@@ -1,9 +1,10 @@
 #!/bin/bash
-# Weekly MEXC + Kraken + Crypto.com + on-chain wallets + IBKR archive + snapshot, run by launchd (com.assetsboard.weekly-archive).
-# MEXC, Kraken and Crypto.com keys live only in this Mac's Keychain (service assetsboard; legacy bitguard still read); IBKR is read from the local
-# IB Gateway (127.0.0.1:4001, read-only API) — so the box cannot do this.
-# Each source runs independently: one failing (or the Gateway being closed / logged out) never blocks the others.
-# Exports for the box routine: ~/AssetsBoard/exports/{mexc,kraken,cryptocom,wallets,ibkr}_archive.tgz
+# Weekly MEXC + Kraken + Crypto.com + on-chain wallets + ether.fi Cash archive, run by launchd (com.assetsboard.weekly-archive).
+# MEXC / Kraken / Crypto.com keys live only in this Mac's Keychain (service assetsboard; legacy bitguard still read).
+# IBKR live Gateway snapshot is NOT scheduled — open IB Gateway only when you ask AssetsBoard to refresh IBKR.
+# IBKR Flex Web Service (HTTP token/query) still runs monthly here; it does not need Gateway.
+# Each source runs independently: one failing never blocks the others.
+# Exports: ~/AssetsBoard/exports/{mexc,kraken,cryptocom,wallets,etherfi_cash,ibkr}_archive.tgz
 # Log: ~/Library/Logs/AssetsBoard-archive.log
 set -u
 LOG="$HOME/Library/Logs/AssetsBoard-archive.log"
@@ -78,11 +79,11 @@ rc_w=$?
 if [ -d archive/wallets ]; then export_dir archive/wallets wallets_archive.tgz || rc_w=3; fi
 echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') wallets weekly $([ $rc_w -eq 0 ] && echo OK || echo "FAILED (exit $rc_w)") ====="
 
-# ---- IBKR (only when IB Gateway is running and logged in; otherwise logged and skipped, not an error)
+# ---- IBKR Flex only (HTTP; no Gateway). Live Gateway archive is manual — user opens Gateway then asks.
 rc_i=0
-# Flex Web Service (deposits, dividends, fees, full trade history) — monthly: the query period is "last month", so fetch on the
-# first Monday of the month (day 1–7), or as a catch-up when the newest Flex import is older than 35 days (or missing).
-# Only runs once a token is stored; independent of the Gateway.
+# Flex Web Service (deposits, dividends, fees, full trade history) — monthly: query period is "last month".
+# Runs on the first Monday of the month (day 1–7), or catch-up when newest Flex import is older than 35 days / missing.
+# Needs Keychain IBKR_FLEX_TOKEN + IBKR_FLEX_QUERY_ID only — does NOT need IB Gateway.
 flex_age=$(.venv/bin/python - <<'PY' 2>/dev/null
 import json, datetime as dt
 try:
@@ -95,23 +96,15 @@ PY
 )
 dom=$((10#$(date +%d)))
 if [ "$dom" -le 7 ] || [ "${flex_age:-9999}" -gt 35 ]; then
-  echo "IBKR Flex: monthly fetch (day $dom, last import ${flex_age:-?} days ago)"
+  echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') IBKR Flex monthly start ====="
   .venv/bin/python -m assetsboard ibkr-flex-fetch --if-configured || echo "IBKR Flex: fetch failed (exit $?), continuing"
-else
-  echo "IBKR Flex: not due (day $dom, last import ${flex_age} days ago; runs on the first Monday of the month)"
-fi
-if .venv/bin/python -c "import sys; from assetsboard import ibkr; sys.exit(0 if ibkr.available() else 1)"; then
-  echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') IBKR weekly start ====="
-  .venv/bin/python -m assetsboard archive --exchange ibkr
-  rc_i=$?
-  [ $rc_i -eq 2 ] && { echo "IBKR: Gateway not ready (logged out?), skipped"; rc_i=0; }
   if [ -d archive/ibkr ]; then export_dir archive/ibkr ibkr_archive.tgz || rc_i=3; fi
-  echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') IBKR weekly $([ $rc_i -eq 0 ] && echo OK || echo "FAILED (exit $rc_i)") ====="
+  echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') IBKR Flex monthly done ====="
 else
-  echo "IBKR: IB Gateway not running on 127.0.0.1:4001, skipped"
-  if [ -d archive/ibkr/flex ]; then export_dir archive/ibkr ibkr_archive.tgz || rc_i=3; fi
+  echo "IBKR Flex: not due (day $dom, last import ${flex_age} days ago; runs early in the month / if stale >35d)"
+  if [ -d archive/ibkr/flex ]; then export_dir archive/ibkr ibkr_archive.tgz || true; fi
 fi
-
+echo "IBKR Gateway live snapshot: skipped on schedule (open Gateway only when you ask to refresh IBKR)"
 
 # ---- ether.fi Cash (開銷帳戶)
 rc_e=0

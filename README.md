@@ -76,7 +76,8 @@ Copy or rename your local folder, keep `.venv` or recreate it, and point LaunchA
 ## Safety model
 
 - Exchange modules use **strict allowlists** of read-only endpoints (writes refused locally).
-- IBKR: only localhost Gateway; outgoing TWS messages allowlisted; prefer Gateway “Read-Only API”.
+- IBKR live: only localhost Gateway when **you** ask (not on the weekly LaunchAgent). Outgoing TWS messages allowlisted; prefer Gateway “Read-Only API”.
+- IBKR Flex: monthly HTTP fetch in the weekly job (token in Keychain) — **no Gateway** required.
 - Wallets: public RPC / explorer APIs only.
 - Refresh token + Host checks on the local web server.
 
@@ -110,3 +111,11 @@ Use at your own risk. This is personal portfolio tooling, not financial advice.
 ```
 餘額與 Arbitrum USDC 儲值來自公開瀏覽器 API；卡片商戶明細無公開 API，里程碑涵蓋率以儲值為開銷代理。開銷帳戶 float **不計入**投資總額／投資盈虧。
 
+### IBKR: manual live refresh (no scheduled Gateway)
+
+The weekly LaunchAgent does **not** open or query IB Gateway. For live NAV/positions:
+
+1. Open and log into IB Gateway (API on, Read-Only, port 4001).
+2. Ask AssetsBoard to refresh, or run `archive --exchange ibkr`.
+
+**Flex Query** (deposits, dividends, fees, history) still runs **monthly** via HTTP (`ibkr-flex-fetch`) in `tools/weekly_archive.sh` and does **not** need Gateway.

@@ -1,5 +1,8 @@
 """IBKR (optional, Mac only): read-only TWS socket client for a local IB Gateway, snapshot, executions archive, analysis.
 
+Live Gateway reads are manual (open Gateway, then ask / archive --exchange ibkr). Not run by weekly LaunchAgent.
+Flex Web Service history is separate HTTP and may run monthly without Gateway.
+
 Rules:
 - standard library only: the classic length-prefixed TWS API text protocol (client versions v157..v178, no protobuf).
 - connects only to 127.0.0.1 (IBKR_PORT, default 4001 = live Gateway) with a fixed clientId 47 (IBKR_CLIENT_ID).
