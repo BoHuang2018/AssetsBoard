@@ -1,0 +1,49 @@
+# Secrets & local credentials — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*
+secrets*
+box-secrets.json
+
+# Runtime data (balances, archives, personal overrides)
+archive/**
+!archive/.gitkeep
+exports/
+imports/
+snapshots/**
+!snapshots/.gitkeep
+**/analysis_overrides.json
+**/wallets.json
+*.xml
+!**/fixtures/**/*.xml
+
+# Python / venv
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# OS / editor
+.DS_Store
+.AppleDouble
+._*
+.idea/
+.vscode/
+*.swp
+
+# Bundles & sync tarballs
+*.tgz
+*.tar.gz
+*.zip
+AssetsBoard.app/
+BitGuard.app/
+
+# Logs
+*.log
