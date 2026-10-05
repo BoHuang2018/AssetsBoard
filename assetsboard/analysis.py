@@ -855,6 +855,10 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
         ex["wallets"]["n_wallets"] = len(wl.get("wallets") or [])
         ex["wallets"]["wallet_labels"] = [w.get("label") for w in (wl.get("wallets") or [])]
 
+    # ether.fi Cash analyzed after investment PnL is known (coverage); placeholder for exchange map
+    ex["etherfi_cash"] = {"present": False, "configured": False, "group": "spending",
+                          "reason": "pending"}
+
     from . import ibkr as ibkr_mod
     try:
         ib = ibkr_mod.analyze(project, archive_dir / "ibkr", offline=offline)
@@ -873,10 +877,18 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
         ex["ibkr"]["baseline"] = {"at": fl.get("account_start"), "value": fl.get("opening_value"),
                                   "label": ("開戶以來（Flex，至 " if fl.get("complete") else "Flex 期間（自 ") + f"{fl.get('coverage_to') if fl.get('complete') else fl.get('account_start')}）"}
     for k, v in ex.items():
-        v["group"] = "securities" if k == "ibkr" else "crypto"  # wallets → crypto
+        if k == "ibkr":
+            v["group"] = "securities"
+        elif k == "etherfi_cash":
+            v["group"] = "spending"
+        else:
+            v["group"] = "crypto"
     if mx.get("baseline"):
         ex["mexc"]["baseline"] = {k: mx["baseline"].get(k) for k in ("at", "value", "label", "net_inflow", "capital")}
-    tot = sum((v.get("total") or 0) for v in ex.values() if v.get("present"))
+    tot = sum((v.get("total") or 0) for v in ex.values()
+              if v.get("present") and v.get("group") != "spending")  # investment only
+    spending_float = sum((v.get("total") or 0) for v in ex.values()
+                         if v.get("present") and v.get("group") == "spending")
     for v in ex.values():
         v["share"] = (v["total"] / tot * 100) if v.get("present") and tot else None
     nets = [v.get("net_inflow") for v in ex.values() if v.get("present")]
@@ -944,6 +956,33 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
     if cc.get("present"):
         res["combined"]["method"] += f"Crypto.com：自 {(cc.get('baseline') or {}).get('at', '')[:10]} 基準起算（基準後入金／出金從交易紀錄辨識）。"
     res["wallets"] = wl
+    from . import etherfi_cash as efc_mod
+    try:
+        efc = efc_mod.analyze(project, archive_dir / "etherfi_cash", offline=offline,
+                              investment_pnl=res["combined"].get("pnl"))
+    except Exception as e:  # noqa: BLE001
+        efc = {"present": False, "configured": False, "group": "spending",
+               "reason": f"ether.fi Cash 分析失敗：{type(e).__name__}: {e}"[:300]}
+    ex["etherfi_cash"] = {k: efc.get(k) for k in (
+        "present", "configured", "reason", "total", "label", "vault", "snapshot_time",
+        "topups_usdt", "spend_proxy_usdt", "spend_proxy_method", "coverage_ratio",
+        "coverage_pct", "investment_pnl", "n_topups")}
+    ex["etherfi_cash"]["group"] = "spending"
+    if efc.get("present"):
+        ex["etherfi_cash"]["share"] = None  # not part of investment total
+        spending_float = efc.get("total") or 0
+        res["combined"]["spending_float"] = spending_float
+        res["combined"]["etherfi_cash"] = {
+            "total": efc.get("total"), "spend_proxy_usdt": efc.get("spend_proxy_usdt"),
+            "coverage_ratio": efc.get("coverage_ratio"), "coverage_pct": efc.get("coverage_pct"),
+            "spend_proxy_method": efc.get("spend_proxy_method"), "label": efc.get("label"),
+        }
+        res["combined"]["method"] += (
+            f"ether.fi Cash：開銷帳戶 float 不計入投資總額；開銷代理＝儲值 "
+            f"{(efc.get('spend_proxy_usdt') or 0):,.2f} USDT（{efc.get('spend_proxy_method')}）；"
+            f"涵蓋率＝投資盈虧／開銷代理"
+            + (f"＝{(efc.get('coverage_pct')):.0f}%。" if efc.get("coverage_pct") is not None else "。"))
+    res["etherfi_cash"] = efc
     if wl.get("present"):
         res["combined"]["method"] += f"鏈上錢包：自 {(wl.get('baseline') or {}).get('at', '')[:10]} 基準起算（公開 RPC／瀏覽器 API，無私鑰；出入金未自動辨識）。"
     res["ibkr"] = ib
@@ -989,6 +1028,11 @@ def render(res: dict) -> str:
          *([f"鏈上錢包：總額 {res['wallets']['total']:,.2f}（{len(res['wallets'].get('wallets') or [])} 個）；"
             + ("盈虧 —" if res['wallets'].get('pnl') is None else f"基準淨入金 {res['wallets']['net_inflow']:,.2f}；盈虧 {res['wallets']['pnl']:+,.2f}")]
            if res.get("wallets", {}).get("present") else [f"鏈上錢包：{res.get('wallets', {}).get('reason', '—')}"]),
+         *([f"ether.fi Cash（開銷）：float {res['etherfi_cash']['total']:,.2f}；"
+            f"開銷代理 {res['etherfi_cash'].get('spend_proxy_usdt') or 0:,.2f}；"
+            + ("涵蓋 " + (f"{res['etherfi_cash']['coverage_pct']:.0f}%" if res['etherfi_cash'].get('coverage_pct') is not None else "—"))]
+           if res.get("etherfi_cash", {}).get("present") else
+           [f"ether.fi Cash：{res.get('etherfi_cash', {}).get('reason', '—')}"]),
          *([f"IBKR：NAV {res['ibkr']['nav_base']:,.2f} {res['ibkr']['base_currency']}（≈ {res['ibkr']['total']:,.2f} USDT）；"
             f"{'淨入金' if str(res['ibkr'].get('pnl_method', '')).startswith('flex') else '基準'} {res['ibkr']['net_inflow_base']:,.2f}；"
             f"盈虧 {res['ibkr']['pnl_base']:+,.2f} {res['ibkr']['base_currency']}（{pct(res['ibkr'].get('pnl_pct'))}）"]

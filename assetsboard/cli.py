@@ -21,6 +21,7 @@ from . import kraken as kraken_mod
 from . import ibkr as ibkr_mod
 from . import cryptocom as cdc_mod
 from . import wallets as wallets_mod
+from . import etherfi_cash as efc_mod
 from .client import SNAPSHOT_DIR, Client, cli_cmd, credentials_available, fnum, now_oslo, ok, stamp
 
 
@@ -32,7 +33,7 @@ def _which(args) -> tuple[bool, bool, bool]:
     """(run bitget, run mexc, run kraken) for --exchange all|bitget|mexc|kraken|ibkr. 'all' skips an exchange without credentials.
     IBKR is handled separately by _run_ibkr (it needs the local IB Gateway, not API keys)."""
     ex = getattr(args, "exchange", "bitget") or "bitget"
-    if ex in ("bitget", "mexc", "kraken", "ibkr", "cryptocom", "wallets"):
+    if ex in ("bitget", "mexc", "kraken", "ibkr", "cryptocom", "wallets", "etherfi-cash"):
         return ex == "bitget", ex == "mexc", ex == "kraken"
     b, m, k = credentials_available(), mexc_mod.available(), kraken_mod.available()
     if not b:
@@ -59,6 +60,11 @@ def _run_ibkr(args) -> bool:
 def _run_wallets(args) -> bool:
     ex = getattr(args, "exchange", "bitget") or "bitget"
     return ex in ("wallets", "all")
+
+
+def _run_etherfi(args) -> bool:
+    ex = getattr(args, "exchange", "bitget") or "bitget"
+    return ex in ("etherfi-cash", "all")
 
 
 def _wallets_print(d: dict) -> None:
@@ -436,6 +442,19 @@ def cmd_balance(args) -> int:
         _wallets_print(d)
         if not d.get("ok"):
             rc = max(rc, 1)
+    if _run_etherfi(args):
+        root = SNAPSHOT_DIR.parent / "archive" / "etherfi_cash"
+        d = efc_mod.build_snapshot(root)
+        if not d.get("ok"):
+            print(f"\n=== ether.fi Cash ===\n{d.get("reason") or d.get("errors")}")
+        else:
+            print(f"\n=== ether.fi Cash（開銷帳戶）  {d["captured_oslo"][:16]} ===")
+            print(f"vault {d.get("vault")}")
+            for tok in d.get("tokens") or []:
+                v = tok.get("value_usdt")
+                print(f"  {tok["symbol"]:12} {tok["amount"]:.8g}" + (f"  ≈ {v:,.2f}" if v is not None else "  （無報價）"))
+            print(f"合計 ≈ {(d.get("total_usdt") or 0):,.2f} USDT｜儲值代理 {d.get("spend_proxy_usdt") or 0:,.2f}（{d.get("spend_proxy_method")}）")
+
     if _run_ibkr(args):
         try:
             _ibkr_print(ibkr_mod.build_snapshot(ibkr_mod.fetch(verbose=args.verbose, executions=False), now_oslo()))
@@ -785,6 +804,18 @@ def cmd_archive(args) -> int:
         rep = kraken_mod.archive_run(kraken_mod.KrakenClient(verbose=args.verbose), root / "kraken", since)
         print(archive_mod.render(rep).replace("=== 封存完成", "=== Kraken 封存完成"))
         rc = max(rc, 0 if not rep["errors"] else 1)
+
+    if _run_etherfi(args):
+        eroot = root / "etherfi_cash"
+        print(f"封存中（ether.fi Cash 開銷帳戶，公開瀏覽器 API）→ {eroot} …", file=sys.stderr)
+        rep = efc_mod.archive_run(eroot)
+        if rep.get("snapshot"):
+            print(f"=== ether.fi Cash 封存完成：餘額 ≈ {(rep.get('total_usdt') or 0):,.2f} USDT；"
+                  f"儲值代理 {(rep.get('spend_proxy_usdt') or 0):,.2f} ===")
+        else:
+            print("ether.fi Cash：" + "; ".join(str(v) for v in (rep.get("errors") or {}).values()), file=sys.stderr)
+        rc = max(rc, 1 if rep.get("errors") and rep.get("configured") else 0)
+
     return rc
 
 
@@ -819,7 +850,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-v", "--verbose", action="store_true", help="在 stderr 顯示每個端點的狀態")
     sub = ap.add_subparsers(dest="cmd", metavar="<command>")
     def ex(p, default="all"):
-        p.add_argument("--exchange", choices=["all", "bitget", "mexc", "kraken", "ibkr", "cryptocom", "wallets"], default=default,
+        p.add_argument("--exchange", choices=["all", "bitget", "mexc", "kraken", "ibkr", "cryptocom", "wallets", "etherfi-cash"], default=default,
                        help="交易所（預設 all：有憑證的都跑，沒有憑證的略過）")
         return p
     ex(sub.add_parser("balance", help="快速查看各帳戶持倉（Bitget＋MEXC＋Kraken＋Crypto.com＋鏈上錢包）")).set_defaults(func=cmd_balance)
