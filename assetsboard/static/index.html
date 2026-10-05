@@ -31,6 +31,15 @@ body.hide .amt{filter:blur(7px);user-select:none}
 .conf-high{color:var(--up)}.conf-medium{color:var(--warn)}.conf-low{color:var(--down)}
 svg text{fill:var(--mut);font-size:11px}.legend span{margin-right:14px;font-size:12px;color:var(--mut)}.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
 #err{color:var(--down);padding:20px}.small{font-size:12px}
+
+.pnl-hero{background:linear-gradient(135deg,#1a2230 0%,#141a24 100%);border:1px solid var(--line);border-radius:16px;padding:22px 24px;margin-bottom:18px;display:flex;flex-wrap:wrap;gap:18px 28px;align-items:flex-end}
+.pnl-hero .state{font-size:15px;font-weight:600;letter-spacing:.04em}
+.pnl-hero .big{font-size:42px;font-weight:700;line-height:1.1;margin-top:6px}
+.pnl-hero .big.up{color:var(--up)}.pnl-hero .big.down{color:var(--down)}
+.pnl-hero .sub{color:var(--mut);font-size:13px;margin-top:8px;max-width:520px}
+.pnl-hero .side{display:flex;gap:12px;flex-wrap:wrap;margin-left:auto}
+.pnl-hero .chip{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 14px;min-width:120px}
+.pnl-hero .chip .k{font-size:11px;color:var(--mut)}.pnl-hero .chip .v{font-size:18px;font-weight:600;margin-top:2px}
 #hint{display:none;background:#2a2312;border:1px solid var(--warn);color:#f3d27a;border-radius:10px;padding:10px 14px;margin-bottom:14px;white-space:pre-line}
 #hint code,.code{background:#00000055;padding:1px 6px;border-radius:5px;color:var(--text);user-select:all}
 #rstatus{font-size:12px;color:var(--mut);display:flex;align-items:center;gap:8px}#rstatus .bar{width:120px}
@@ -44,7 +53,7 @@ svg text{fill:var(--mut);font-size:11px}.legend span{margin-right:14px;font-size
 <header>
   <h1>assetsboard</h1>
   <nav id="nav">
-    <button data-s="ov" class="on">總覽</button><button data-s="bg">Bitget</button><button data-s="mx">MEXC</button><button data-s="kr">Kraken</button><button data-s="cc">Crypto.com</button><button data-s="wl">鏈上錢包</button><button data-s="ib">IBKR</button>
+    <button data-s="ov" class="on">總覽</button><button data-s="bg">Bitget</button><button data-s="mx">MEXC</button><button data-s="kr">Kraken</button><button data-s="cc">Crypto.com</button><button data-s="wl">鏈上錢包</button><button data-s="ef">ether.fi Cash</button><button data-s="ib">IBKR</button>
   </nav>
   <div class="sp"></div>
   <span id="rstatus"></span>
@@ -70,6 +79,7 @@ svg text{fill:var(--mut);font-size:11px}.legend span{margin-right:14px;font-size
 <section id="kr"></section>
 <section id="cc"></section>
 <section id="wl"></section>
+<section id="ef"></section>
 <section id="ib"></section>
 </main>
 <script>
@@ -151,8 +161,8 @@ function xcheck(o,A,diff){const X=o.crosscheck||[];if(!X.length)return "";
     if(uta){const imp=uta.value+diff;note=`<div class="small" style="margin-top:6px">若差額全部來自 uta：uta 隱含現值 ≈ ${amt(imp)}（成本 ${amt(uta.value)}，${pct(uta.value?diff/uta.value*100:null)}）。uta 餘額在經典帳戶模式下 API 無法讀取（40084），請在 App 確認。</div>`}}
   return `<h2 style="margin-top:14px">逐帳戶對帳（快照 ${esc((o.snapshot_time||"").slice(0,16).replace("T"," "))}）</h2><table><tr><th class="l">項目</th><th>Bitget 估值</th><th>本工具</th><th>差</th><th class="l">來源</th></tr>${rows}${inv}${foot}</table>${note}`}
 function merged(){const E=D.exchanges,C=D.combined;if(!E)return "";
-  const N={bitget:"Bitget",mexc:"MEXC",kraken:"Kraken",cryptocom:"Crypto.com",wallets:"鏈上錢包",ibkr:"IBKR"};
-  const rows=Object.entries(E).map(([k,v])=>v.present?`<tr><td class="l">${N[k]||esc(k)} <span class="tag">${v.group==="securities"?"證券":"加密"}</span></td><td>${amt(v.total)}${k==="ibkr"&&v.nav_base!=null?`<div class="small">${amt(v.nav_base)} ${esc(v.base_currency)}</div>`:""}${k==="mexc"&&v.earn_manual?`<div class="small">含理財 ${amt(v.earn_manual.value)} ${earnTag(v.earn_manual)}</div>`:""}${k==="wallets"&&v.n_wallets?`<div class="small">${v.n_wallets} 個錢包</div>`:""}</td><td>${pct(v.share).replace(/[+]/,"")}</td><td>${v.net_inflow==null?"—":amt(v.net_inflow)}</td><td>${v.pnl==null?"—":amt(v.pnl)}</td><td>${pct(v.pnl_pct)}${k==="mexc"&&v.baseline?` <span class="tag">${esc(v.baseline.label)}</span>`:k==="mexc"&&!v.history_complete?' <span class="stale" title="MEXC API 只能查 90 天充提；更早的入金看不到">⚠ 歷史可能不完整</span>':k==="kraken"&&!v.history_complete?' <span class="stale" title="Kraken 帳本尚未完整讀取">⚠ 帳本未完整</span>':k==="ibkr"&&v.baseline?` <span class="tag">${esc(v.baseline.label)}</span>`:k==="cryptocom"&&(v.full_history||v.baseline)?` <span class="tag" title="${v.full_history?"盈虧 % 以開戶以來總入金計算":""}">${esc((v.full_history||v.baseline).label)}</span>`+(v.warning?' <span class="stale" title="'+esc(v.warning)+'">⚠ 金鑰</span>':""):k==="wallets"&&v.baseline?` <span class="tag">${esc(v.baseline.label)}</span>`:""}</td><td class="mut">${esc((v.snapshot_time||"").slice(0,16).replace("T"," "))}</td></tr>`
+  const N={bitget:"Bitget",mexc:"MEXC",kraken:"Kraken",cryptocom:"Crypto.com",wallets:"鏈上錢包",etherfi_cash:"ether.fi Cash",ibkr:"IBKR"};
+  const rows=Object.entries(E).map(([k,v])=>v.present?`<tr><td class="l">${N[k]||esc(k)} <span class="tag">${v.group==="securities"?"證券":v.group==="spending"?"開銷":"加密"}</span></td><td>${amt(v.total)}${k==="ibkr"&&v.nav_base!=null?`<div class="small">${amt(v.nav_base)} ${esc(v.base_currency)}</div>`:""}${k==="mexc"&&v.earn_manual?`<div class="small">含理財 ${amt(v.earn_manual.value)} ${earnTag(v.earn_manual)}</div>`:""}${k==="wallets"&&v.n_wallets?`<div class="small">${v.n_wallets} 個錢包</div>`:""}</td><td>${pct(v.share).replace(/[+]/,"")}</td><td>${v.net_inflow==null?"—":amt(v.net_inflow)}</td><td>${v.pnl==null?"—":amt(v.pnl)}</td><td>${pct(v.pnl_pct)}${k==="mexc"&&v.baseline?` <span class="tag">${esc(v.baseline.label)}</span>`:k==="mexc"&&!v.history_complete?' <span class="stale" title="MEXC API 只能查 90 天充提；更早的入金看不到">⚠ 歷史可能不完整</span>':k==="kraken"&&!v.history_complete?' <span class="stale" title="Kraken 帳本尚未完整讀取">⚠ 帳本未完整</span>':k==="ibkr"&&v.baseline?` <span class="tag">${esc(v.baseline.label)}</span>`:k==="cryptocom"&&(v.full_history||v.baseline)?` <span class="tag" title="${v.full_history?"盈虧 % 以開戶以來總入金計算":""}">${esc((v.full_history||v.baseline).label)}</span>`+(v.warning?' <span class="stale" title="'+esc(v.warning)+'">⚠ 金鑰</span>':""):k==="wallets"&&v.baseline?` <span class="tag">${esc(v.baseline.label)}</span>`:""}</td><td class="mut">${esc((v.snapshot_time||"").slice(0,16).replace("T"," "))}</td></tr>`
     :`<tr><td class="l">${N[k]||esc(k)}</td><td colspan="6" class="l mut">${esc(v.reason||"未設定")}</td></tr>`).join("");
   const bar=Object.entries(E).filter(([k,v])=>v.present&&v.share).map(([k,v],i)=>`<i title="${N[k]}" style="width:${v.share}%;background:${({bitget:"var(--acc)",mexc:"#26c6da",kraken:"#b26bff",cryptocom:"#1199fa",wallets:"#66bb6a",ibkr:"#e0a526"})[k]||"#888"};display:inline-block;height:100%"></i>`).join("");
   return `<div class="panel"><h2>跨交易所總覽</h2>
@@ -161,7 +171,7 @@ function merged(){const E=D.exchanges,C=D.combined;if(!E)return "";
    <div class="bar" style="height:10px;display:flex">${bar}</div>
    <table style="margin-top:8px"><tr><th class="l">交易所</th><th>總資產</th><th>佔比</th><th>淨入金</th><th>盈虧</th><th>盈虧 %</th><th>快照</th></tr>${rows}</table>${C.method?`<div class="small mut" style="margin-top:6px">${esc(C.method)}</div>`:""}${xpairs(C.cross_matched)}</div>`}
 function hasSec(G){return !!(G&&G.securities&&G.securities.exchanges&&G.securities.exchanges.length)}
-function grpCards(G){if(!hasSec(G))return "";const N={bitget:"Bitget",mexc:"MEXC",kraken:"Kraken",cryptocom:"Crypto.com",wallets:"鏈上錢包",ibkr:"IBKR"};
+function grpCards(G){if(!hasSec(G))return "";const N={bitget:"Bitget",mexc:"MEXC",kraken:"Kraken",cryptocom:"Crypto.com",wallets:"鏈上錢包",etherfi_cash:"ether.fi Cash",ibkr:"IBKR"};
   const g=(lab,x,extra)=>card(lab+" 盈虧",pct(x.pnl_pct),(x.pnl==null?"—":amt(x.pnl))+"　淨入金 "+(x.net_inflow==null?"—":amt(x.net_inflow))+"<br><span class='small mut'>總資產 "+amt(x.total)+"（佔 "+pct(x.share).replace(/[+]/,"")+"）；"+x.exchanges.map(k=>N[k]).join("＋")+extra+"</span>");
   return `<div class="cards" style="margin-bottom:10px">${g("加密",G.crypto,"")}${g("證券",G.securities,"（換算 USDT）")}</div>`}
 function xpairs(X){if(!X||!(X.pairs||[]).length)return "";
@@ -226,6 +236,46 @@ function renderBitget(){
    <div class="panel"><h2>資產配置</h2>${alloc()}</div></div>`;
   $("#bgsum").innerHTML=h;
 }
+function pnlHero(){
+  const C=D.combined||{}, G=C.groups||{}, crypto=G.crypto||{}, sec=G.securities||{};
+  const pnl=C.pnl, pp=C.pnl_pct, tot=C.total, net=C.net_inflow;
+  const win=pnl!=null&&pnl>=0, lab=pnl==null?"投資盈虧（尚無合併數字）":(win?"投資賺錢":"投資虧錢");
+  const cls=pnl==null?"":(win?"up":"down");
+  const abs=pnl==null?"—":amt(Math.abs(pnl));
+  const sign=pnl==null?"":(win?"+":"−");
+  let chips=`<div class="chip"><div class="k">投資總資產</div><div class="v">${amt(tot)}</div></div>
+    <div class="chip"><div class="k">淨入金</div><div class="v">${amt(net)}</div></div>`;
+  if(crypto.exchanges&&crypto.exchanges.length) chips+=`<div class="chip"><div class="k">加密盈虧</div><div class="v ${sgn(crypto.pnl)}">${pct(crypto.pnl_pct)} <span class="small">${crypto.pnl==null?"":amt(crypto.pnl)}</span></div></div>`;
+  if(sec.exchanges&&sec.exchanges.length) chips+=`<div class="chip"><div class="k">證券盈虧</div><div class="v ${sgn(sec.pnl)}">${pct(sec.pnl_pct)} <span class="small">${sec.pnl==null?"":amt(sec.pnl)}</span></div></div>`;
+  const EF=(C.etherfi_cash)||(D.etherfi_cash&&D.etherfi_cash.present?D.etherfi_cash:null);
+  if(EF&&(EF.total!=null||EF.spend_proxy_usdt!=null)){
+    const cov=EF.coverage_pct, covCls=cov==null?"":(cov>=100?"up":"down");
+    chips+=`<div class="chip"><div class="k">開銷涵蓋率</div><div class="v ${covCls}">${cov==null?"—":num(cov,0)+"%"}</div>
+      <div class="small mut">成長 ${amt(EF.investment_pnl!=null?EF.investment_pnl:pnl)}／儲值代理 ${amt(EF.spend_proxy_usdt)}</div></div>`;
+  }
+  return `<div class="pnl-hero">
+    <div><div class="state ${cls}">${lab}</div>
+      <div class="big ${cls} amt">${pnl==null?"—":sign+abs}</div>
+      <div class="sub">合併投資盈虧 ${pct(pp)}　＝投資總資產 − 淨入金（不含 ether.fi Cash 開銷帳戶 float）
+      ${(C.pnl_overstated_up_to?`<br><span class="stale">⚠ 合併盈虧最多高估 ${amt(C.pnl_overstated_up_to)}（MEXC 封存前資金）</span>`:"")}</div></div>
+    <div class="side">${chips}</div></div>`;
+}
+function renderEtherfi(){const E=D.etherfi_cash||{};
+  if(!E.present){$("#ef").innerHTML=`<div class="panel"><h2>ether.fi Cash（開銷帳戶）</h2><div class="mut">${esc(E.reason||"未設定")}</div>
+    <div class="small" style="margin-top:8px">複製 <code>etherfi_cash.example.json</code> → <code>archive/etherfi_cash/config.json</code>，填入 Cash vault 地址後執行
+    <code>.venv/bin/python -m assetsboard archive --exchange etherfi-cash</code>。</div></div>`;return}
+  const cov=E.coverage_pct, covOk=cov!=null&&cov>=100;
+  let h=`<div class="cards">${card("Cash float",amt(E.total),"開銷帳戶 · 不計入投資總額 · "+esc(E.label||""))}
+   ${card("開銷代理（儲值）",amt(E.spend_proxy_usdt),esc(E.spend_proxy_method||"")+" · "+(E.n_topups||0)+" 筆 Arbitrum USDC 儲值")}
+   ${card("涵蓋率（成長／開銷）",cov==null?"—":`<span class="${covOk?"up":"down"}">${num(cov,0)}%</span>`,
+     "投資盈虧 "+amt(E.investment_pnl)+" ÷ 儲值代理。≥100%＝成長已覆蓋開銷代理。卡片商戶明細無公開 API，以儲值為代理。")}</div>`;
+  h+=`<div class="panel"><h2>Optimism 餘額</h2><div class="small mut">vault ${esc(E.vault||"")}</div>
+    <table><tr><th class="l">代幣</th><th>數量</th><th>價值</th></tr>${(E.tokens||[]).map(t=>`<tr><td class="l">${esc(t.symbol)}</td><td>${qty(t.amount)}</td><td>${t.value_usdt==null?"—":amt(t.value_usdt)}</td></tr>`).join("")||'<tr><td colspan="3" class="mut l">（無）</td></tr>'}</table></div>`;
+  const tops=[...(E.topups||[])].reverse().slice(0,25);
+  h+=`<div class="panel"><h2>最近儲值（Arbitrum USDC → vault）</h2><div style="overflow:auto;max-height:40vh"><table><tr><th>時間</th><th>金額</th><th class="l">From</th></tr>${tops.map(x=>`<tr><td>${esc((x.at||"").slice(0,16).replace("T"," "))}</td><td>${amt(x.usdt)}</td><td class="l small">${esc((x.from||"").slice(0,10))}…</td></tr>`).join("")||'<tr><td colspan="3" class="mut l">（尚無）</td></tr>'}</table></div></div>`;
+  h+=`<div class="panel"><h2>說明</h2>${(E.notes||[]).map(n=>`<div class="note small mut">${esc(n)}</div>`).join("")}</div>`;
+  $("#ef").innerHTML=h}
+
 function renderOverview(){const E=D.exchanges||{},B=E.bitget||{},M=E.mexc||{},o=D.overview,A=D.app_total||{};
   const inv=(o.invisible||[]).reduce((t,x)=>t+(x.value||0),0);
   const li=[];
@@ -243,12 +293,16 @@ function renderOverview(){const E=D.exchanges||{},B=E.bitget||{},M=E.mexc||{},o=
   if(CX.present||CX.configured)li.push(CX.present?`<b>Crypto.com</b>：總資產 ${amt(CX.total)}（佔 ${pct(CX.share).replace(/[+]/,"")}；Earn／質押 ${amt(CX.earn)}），`+(CX.pnl==null?"盈虧 —":`${esc((CX.baseline||{}).label||"")}盈虧 ${amt(CX.pnl)}（${pct(CX.pnl_pct)}）`)+(CX.warning?`　<span class="stale">⚠ ${esc(CX.warning)}</span>`:"")+"。":`<b>Crypto.com</b>：<span class="stale">${esc(CX.reason||"")}</span>`);
   const WX=E.wallets||{};
   if(WX.present)li.push(`<b>鏈上錢包</b>：總資產 ${amt(WX.total)}（佔 ${pct(WX.share).replace(/[+]/,"")}；${WX.n_wallets||0} 個），`+(WX.pnl==null?"盈虧 —":`基準以來 ${amt(WX.pnl)}（${pct(WX.pnl_pct)}）`)+`。`);
-  const IX=E.ibkr||{},IB=D.ibkr||{};
+  const EX=E.etherfi_cash||D.etherfi_cash||{};
+  if(EX.present)li.push(`<b>ether.fi Cash（開銷）</b>：float ${amt(EX.total)}（不計入投資總額）；開銷代理 ${amt(EX.spend_proxy_usdt)}；涵蓋率 ${EX.coverage_pct==null?"—":num(EX.coverage_pct,0)+"%"}。`);
+  else if(EX.reason)li.push(`<b>ether.fi Cash</b>：<span class="mut">${esc(EX.reason)}</span>`);
+  const IX=E.ibkr||{};
   li.push(IX.present?`<b>IBKR</b>（證券）：淨資產 ${amt(IX.nav_base)} ${esc(IX.base_currency)} ≈ ${amt(IX.total)} USDT（佔 ${pct(IX.share).replace(/[+]/,"")}；現金 ${pct(IX.cash_share).replace(/[+]/,"")}），`+(IX.pnl_base==null?"盈虧 —":String(IX.pnl_method||"").startsWith("flex")?`${esc((IX.baseline||{}).label||"Flex")}盈虧 ${amt(IX.pnl_base)} ${esc(IX.base_currency)}（${pct(IX.pnl_pct)}）<span class="small mut">　出入金來自 Flex Query</span>`:`自 ${esc((IX.baseline||{}).at?.slice(0,10)||"—")} 基準盈虧 ${amt(IX.pnl_base)} ${esc(IX.base_currency)}（${pct(IX.pnl_pct)}）<span class="small mut">　TWS 讀不到出入金，假設基準後無出入金</span>`)+`。`
     :`<b>IBKR</b>：<span class="mut">${esc(IX.reason||"未設定")}</span>`);
   li.push(`<span class="mut">分析 ${esc((D.generated_oslo||"").slice(0,16).replace("T"," "))}；Bitget 快照 ${esc((B.snapshot_time||"").slice(0,16).replace("T"," "))}`+(M.present?`；MEXC 快照 ${esc((M.snapshot_time||"").slice(0,16).replace("T"," "))}`:"")+(KX.present?`；Kraken 快照 ${esc((KX.snapshot_time||"").slice(0,16).replace("T"," "))}`:"")+(WX.present?`；鏈上錢包 ${esc((WX.snapshot_time||"").slice(0,16).replace("T"," "))}`:"")+(IX.present?`；IBKR 快照 ${esc((IX.snapshot_time||"").slice(0,16).replace("T"," "))}`:"")+"（Oslo）</span>");
-  $("#ov").innerHTML=merged()+`<div class="panel"><h2>摘要</h2><ul class="sumlist">${li.map(x=>`<li>${x}</li>`).join("")}</ul>
-   <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="tab('bg')">Bitget 詳情 →</button><button class="btn" onclick="tab('mx')">MEXC 詳情 →</button><button class="btn" onclick="tab('kr')">Kraken 詳情 →</button><button class="btn" onclick="tab('cc')">Crypto.com →</button><button class="btn" onclick="tab('wl')">鏈上錢包 →</button><button class="btn" onclick="tab('ib')">IBKR 詳情 →</button></div></div>`}
+  $("#ov").innerHTML=pnlHero()+merged()+`<div class="panel"><h2>摘要</h2><ul class="sumlist">${li.map(x=>`<li>${x}</li>`).join("")}</ul>
+   <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="tab('bg')">Bitget 詳情 →</button><button class="btn" onclick="tab('mx')">MEXC 詳情 →</button><button class="btn" onclick="tab('kr')">Kraken 詳情 →</button><button class="btn" onclick="tab('cc')">Crypto.com →</button><button class="btn" onclick="tab('wl')">鏈上錢包 →</button><button class="btn" onclick="tab('ef')">ether.fi Cash →</button><button class="btn" onclick="tab('ib')">IBKR 詳情 →</button></div></div>`;
+}
 
 function renderWallets(){const W=D.wallets||{},BL=W.baseline||{},tot=W.total||0;
   if(!W.present){$("#wl").innerHTML=`<div class="panel"><h2>鏈上錢包</h2><div class="mut">${esc(W.reason||"尚無快照")}</div>
@@ -465,7 +519,7 @@ async function load(){
   try{const r=await fetch("/api/analysis");D=await r.json();if(!r.ok)throw new Error(D.error||r.status);
     $("#err").textContent="";
     $("#meta").textContent=`分析 ${D.generated_oslo.slice(0,16).replace("T"," ")}　快照 ${(D.overview.snapshot_time||"").slice(0,16).replace("T"," ")}（Oslo）`;
-    applyEarn();renderOverview();renderBitget();renderHoldings();renderRealized();renderFlows();renderMexc();renderKraken();renderCdc();renderWallets();renderIbkr();renderDQ();
+    applyEarn();renderOverview();renderBitget();renderHoldings();renderRealized();renderFlows();renderMexc();renderKraken();renderCdc();renderWallets();renderEtherfi();renderIbkr();renderDQ();
   }catch(e){$("#err").textContent="無法載入分析："+e.message}
 }
 load();

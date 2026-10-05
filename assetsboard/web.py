@@ -130,6 +130,19 @@ def _refresh(st: State) -> None:
                             + (f"；讀取失敗：{', '.join(wrep['errors'])}" if wrep.get("errors") else ""))
         except Exception as e:  # noqa: BLE001
             R["log"].append(f"鏈上錢包失敗：{type(e).__name__}: {e}"[:200])
+        R.update(stage="ether.fi Cash", pct=89)
+        try:
+            from . import etherfi_cash as efc_mod
+            erep = efc_mod.archive_run(st.project / "archive" / "etherfi_cash", progress=False)
+            if erep.get("total_usdt") is not None:
+                R["log"].append(f"ether.fi Cash：float {erep['total_usdt']:,.2f}；開銷代理 {erep.get('spend_proxy_usdt') or 0:,.2f}")
+            elif erep.get("errors"):
+                R["log"].append("ether.fi Cash：" + str(erep["errors"])[:160])
+            else:
+                R["log"].append("ether.fi Cash：未設定")
+        except Exception as e:  # noqa: BLE001
+            R["log"].append(f"ether.fi Cash 失敗：{type(e).__name__}: {e}"[:200])
+
         from . import ibkr as ibkr_mod
         if ibkr_mod.available():
             R.update(stage="IBKR：讀取本機 IB Gateway（唯讀）…", pct=86)

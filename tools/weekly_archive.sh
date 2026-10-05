@@ -112,5 +112,14 @@ else
   if [ -d archive/ibkr/flex ]; then export_dir archive/ibkr ibkr_archive.tgz || rc_i=3; fi
 fi
 
-rc=$rc_m; [ $rc_k -gt $rc ] && rc=$rc_k; [ $rc_c -gt $rc ] && rc=$rc_c; [ $rc_w -gt $rc ] && rc=$rc_w; [ $rc_i -gt $rc ] && rc=$rc_i
+
+# ---- ether.fi Cash (開銷帳戶)
+rc_e=0
+echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') ether.fi Cash weekly start ====="
+.venv/bin/python -m assetsboard archive --exchange etherfi-cash
+rc_e=$?
+[ -d archive/etherfi_cash ] && export_dir archive/etherfi_cash etherfi_cash_archive.tgz || true
+echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') ether.fi Cash weekly $([ $rc_e -eq 0 ] && echo OK || echo "FAILED (exit $rc_e)") ====="
+
+rc=$rc_m; [ $rc_k -gt $rc ] && rc=$rc_k; [ $rc_c -gt $rc ] && rc=$rc_c; [ $rc_w -gt $rc ] && rc=$rc_w; [ $rc_e -gt $rc ] && rc=$rc_e; [ $rc_i -gt $rc ] && rc=$rc_i
 exit $rc

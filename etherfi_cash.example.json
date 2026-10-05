@@ -1,0 +1,7 @@
+{
+  "_doc": "Copy to archive/etherfi_cash/config.json (gitignored). Vault address only — never seed phrases or API passwords.",
+  "enabled": true,
+  "label": "ether.fi Cash（開銷帳戶）",
+  "vault": "0x00000000000000000000000000000000DEADBEEF",
+  "note": "Paste the address shown in ether.fi Cash → Add Funds (same 0x on Arbitrum / Ethereum / Base / Optimism)."
+}

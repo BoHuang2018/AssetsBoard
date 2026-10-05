@@ -101,3 +101,12 @@ exports/         Local only (gitignored) — tarballs for sync
 ## License
 
 Use at your own risk. This is personal portfolio tooling, not financial advice.
+
+### ether.fi Cash（開銷帳戶）
+複製 `etherfi_cash.example.json` → `archive/etherfi_cash/config.json`，填入 Cash vault 地址（`enabled: true`），再執行：
+```bash
+.venv/bin/python -m assetsboard archive --exchange etherfi-cash
+.venv/bin/python -m assetsboard analyze
+```
+餘額與 Arbitrum USDC 儲值來自公開瀏覽器 API；卡片商戶明細無公開 API，里程碑涵蓋率以儲值為開銷代理。開銷帳戶 float **不計入**投資總額／投資盈虧。
+
