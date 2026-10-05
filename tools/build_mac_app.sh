@@ -38,10 +38,16 @@ cat > "$APP/Contents/Info.plist" <<'PL'
 </dict></plist>
 PL
 
-# icon (generated, stdlib only) -> .icns
+# icon: prefer assets/AppIcon.png (custom), else generate via make_icon.py -> .icns
 TMP="$(mktemp -d)"
-"$PROJECT/.venv/bin/python" "$PROJECT/tools/make_icon.py" "$TMP/icon_1024.png"
+ICON_SRC="$PROJECT/assets/AppIcon.png"
+if [ -f "$ICON_SRC" ]; then
+  cp "$ICON_SRC" "$TMP/icon_1024.png"
+else
+  "$PROJECT/.venv/bin/python" "$PROJECT/tools/make_icon.py" "$TMP/icon_1024.png"
+fi
 mkdir -p "$TMP/AssetsBoard.iconset"
+# Required iconutil sizes: 16,32,128,256,512 @1x and @2x (and 1024 as 512@2x)
 for s in 16 32 128 256 512; do
   sips -z $s $s "$TMP/icon_1024.png" --out "$TMP/AssetsBoard.iconset/icon_${s}x${s}.png" >/dev/null
   d=$((s*2)); sips -z $d $d "$TMP/icon_1024.png" --out "$TMP/AssetsBoard.iconset/icon_${s}x${s}@2x.png" >/dev/null
