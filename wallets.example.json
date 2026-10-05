@@ -1,0 +1,19 @@
+{
+  "_doc": "Copy to archive/wallets/wallets.json (gitignored). Addresses only — never put seed phrases or signing keys here.",
+  "wallets": [
+    {
+      "id": "example-arbitrum",
+      "label": "Example · Arbitrum wallet",
+      "chain": "arbitrum",
+      "address": "0x00000000000000000000000000000000DEADBEEF",
+      "note": "Optional"
+    },
+    {
+      "id": "example-bittensor",
+      "label": "Example · Bittensor coldkey",
+      "chain": "bittensor",
+      "address": "5FakeBittensorAddressDoNotUseReplaceMeXXXXXXX",
+      "note": null
+    }
+  ]
+}
