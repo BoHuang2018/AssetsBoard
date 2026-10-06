@@ -841,6 +841,88 @@ def cmd_setup_keychain(args) -> int:
     return keychain_mod.run(only=args.only, use_security_prompt=args.security_prompt, exchange=args.exchange)
 
 
+# ---------------------------------------------------------------- Robinhood (manual, screenshot-fed)
+def _rh_root():
+    from .client import SNAPSHOT_DIR
+    return SNAPSHOT_DIR.parent / "archive" / "robinhood"
+
+
+def _rh_summary(root) -> None:
+    from . import robinhood as rh
+    rows = rh.load_ledger(root)
+    d = rh.derive(rows, rh.load_config(root).get("rewards_paid_as", "crypto"))
+    print(f"Robinhood ledger：{len(rows)} 筆（{rows[0]['date'] if rows else '—'} → {rows[-1]['date'] if rows else '—'}）  {rh.paths(root)['ledger']}")
+    print(f"  淨入金 €{d['net_deposits_eur']:,.2f}　現金估算 €{d['cash_eur']:,.2f}　獎勵 €{d['rewards_eur']:,.2f}　股息 €{d['dividends_eur']:,.2f}")
+    for h in d["holdings"]:
+        print(f"  {h['asset']:6} {h['kind']:6} {h['qty']:.6g}  成本 €{h['cost_eur']:,.2f}" + ("  （數量含推算）" if h["qty_estimated"] else ""))
+
+
+def cmd_robinhood_add(args) -> int:
+    from . import robinhood as rh
+    root = _rh_root()
+    lines = [x for x in args.lines if x.strip()]
+    if args.stdin:
+        lines += [x for x in sys.stdin.read().splitlines() if x.strip() and not x.lstrip().startswith("#")]
+    try:
+        new = [rh.parse_line(x) for x in lines]
+    except rh.LedgerError as e:
+        print(f"錯誤：{e}", file=sys.stderr)
+        return 2
+    added, dup = rh.add_rows(root, new)
+    print(f"新增 {len(added)} 筆，略過重複 {dup} 筆。")
+    _rh_summary(root)
+    print(f"執行 `{cli_cmd()} analyze` 更新儀表板。")
+    return 0
+
+
+def cmd_robinhood_import(args) -> int:
+    from . import robinhood as rh
+    root = _rh_root()
+    total_add = total_dup = 0
+    for f in args.csv:
+        try:
+            new = rh.import_csv_text(Path(f).read_text(encoding="utf-8"))
+        except (OSError, rh.LedgerError) as e:
+            print(f"{f}：{e}", file=sys.stderr)
+            return 2
+        added, dup = rh.add_rows(root, new)
+        total_add += len(added); total_dup += dup
+    print(f"新增 {total_add} 筆，略過重複 {total_dup} 筆。")
+    _rh_summary(root)
+    return 0
+
+
+def cmd_robinhood_list(args) -> int:
+    from . import robinhood as rh
+    root = _rh_root()
+    for r in rh.load_ledger(root):
+        print(f"{r['date']}  {r['type']:9} {r['asset']:6} {r['kind']:6} {r['qty']:>10} @ {r['price_eur']:>9}  {float(r['amount_eur']):+9.2f}"
+              + ("  ~推算" if r["qty_estimated"] else "") + (f"  {r['note']}" if r["note"] else ""))
+    _rh_summary(root)
+    return 0
+
+
+def cmd_robinhood_set_portfolio(args) -> int:
+    from . import robinhood as rh
+    root = _rh_root()
+    if str(args.total).lower() == "clear":
+        rh.save_portfolio(root, None)
+        print("已清除 Portfolio 校準值。")
+        return 0
+    pos = {}
+    for p in args.pos or []:
+        try:
+            sym, rest = p.split("=", 1)
+            q, v = (rest.split(":", 1) + [""])[:2]
+            pos[sym.upper()] = {"qty": float(q) if q else None, "value_eur": float(v) if v else None}
+        except ValueError:
+            print(f"--pos 格式：SYM=QTY:VALUE_EUR（{p!r}）", file=sys.stderr)
+            return 2
+    path = rh.save_portfolio(root, float(args.total), args.cash, args.crypto, pos, args.at)
+    print(f"已寫入 {path}（總值 €{float(args.total):,.2f}）。執行 `{cli_cmd()} analyze` 更新。")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="python3 -m assetsboard",
@@ -887,6 +969,21 @@ def build_parser() -> argparse.ArgumentParser:
     pe = sub.add_parser("set-mexc-earn", help="手動填入 MEXC 理財（Earn）金額（USDT，固定值；API 看不到理財）")
     pe.add_argument("value", help="USDT 金額，或 clear 清除")
     pe.set_defaults(func=cmd_set_mexc_earn)
+    prh = sub.add_parser("robinhood-add", help="Robinhood（無 API）：加入 History 截圖的紀錄，例如 \"2026-01-05 buy ACME 0.5 40.00 -20.02\"（重複的會自動略過）")
+    prh.add_argument("lines", nargs="*", help="DATE TYPE [ASSET] [QTY PRICE] AMOUNT；TYPE＝deposit/withdrawal/reward/buy/sell/token-buy/market-sell/dividend/fee；QTY 結尾加 ~＝推算")
+    prh.add_argument("--stdin", action="store_true", help="從 stdin 讀多行（# 開頭為註解）")
+    prh.set_defaults(func=cmd_robinhood_add)
+    pri = sub.add_parser("robinhood-import", help="Robinhood：匯入 CSV（欄位 date,type,asset,kind,qty,price_eur,amount_eur,qty_estimated,note），重複自動略過")
+    pri.add_argument("csv", nargs="+")
+    pri.set_defaults(func=cmd_robinhood_import)
+    sub.add_parser("robinhood-list", help="Robinhood：列出 ledger 與推算持倉／現金").set_defaults(func=cmd_robinhood_list)
+    prp = sub.add_parser("robinhood-set-portfolio", help="Robinhood：用 Portfolio 截圖校準總值（EUR），或 clear")
+    prp.add_argument("total", help="Portfolio 總值 EUR，或 clear")
+    prp.add_argument("--cash", type=float, help="現金 EUR")
+    prp.add_argument("--crypto", type=float, help="加密貨幣部分 EUR")
+    prp.add_argument("--pos", nargs="*", help="持倉 SYM=QTY:VALUE_EUR（例如 ACME=0.25:12.00）")
+    prp.add_argument("--at", help="截圖時間 ISO（預設現在）")
+    prp.set_defaults(func=cmd_robinhood_set_portfolio)
     ex(sub.add_parser("snapshot", help="儲存快照 JSON 與可作為基準的現貨數量檔到 snapshots/")).set_defaults(func=cmd_snapshot)
     pa = sub.add_parser("audit", help="與基準比對並檢查資金流，輸出中文摘要")
     pa.add_argument("--since", required=True, help="查詢起始日 YYYY-MM-DD（Oslo 時間 00:00）")
