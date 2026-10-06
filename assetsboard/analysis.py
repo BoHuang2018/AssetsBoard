@@ -883,8 +883,16 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
         fl = ib["flex"]
         ex["ibkr"]["baseline"] = {"at": fl.get("account_start"), "value": fl.get("opening_value"),
                                   "label": ("開戶以來（Flex，至 " if fl.get("complete") else "Flex 期間（自 ") + f"{fl.get('coverage_to') if fl.get('complete') else fl.get('account_start')}）"}
+    from . import robinhood as rh_mod
+    try:
+        rh = rh_mod.analyze(project, archive_dir / "robinhood", offline=offline)
+    except Exception as e:  # noqa: BLE001 - optional, manual module
+        rh = {"present": False, "configured": False, "reason": f"Robinhood 分析失敗：{type(e).__name__}: {e}"[:300]}
+    ex["robinhood"] = {k: rh.get(k) for k in ("present", "configured", "reason", "total", "net_inflow", "pnl", "pnl_pct",
+                                               "snapshot_time", "split", "total_eur", "pnl_eur", "net_deposits_eur",
+                                               "value_method", "usdt_per_eur", "last_date")}
     for k, v in ex.items():
-        if k == "ibkr":
+        if k in ("ibkr", "robinhood"):   # Robinhood: stock tokens (+ cash) → securities; its crypto part is split out below
             v["group"] = "securities"
         elif k == "etherfi_cash":
             v["group"] = "spending"
@@ -921,11 +929,19 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
     res["combined"]["pnl_pct"] = res["combined"]["pnl"] / res["combined"]["net_inflow"] * 100 if res["combined"]["net_inflow"] else None
     groups = {}
     for g in ("crypto", "securities"):
+        # an account with `split` (Robinhood: stock tokens + crypto) contributes each part's value to its group;
+        # its net deposits stay with its primary group (rewards/crypto had no deposit of their own).
         m = [v for v in ex.values() if v.get("present") and v.get("group") == g]
-        t = sum(v.get("total") or 0 for v in m)
+        t = 0.0; members = []
+        for k, v in ex.items():
+            if not v.get("present") or v.get("group") == "spending":
+                continue
+            part = (v["split"].get(g) or 0.0) if v.get("split") else ((v.get("total") or 0) if v.get("group") == g else 0.0)
+            if v.get("group") == g or abs(part) > 0.005:
+                t += part; members.append(k)
         n_ok = all(v.get("net_inflow") is not None for v in m)
         net = sum(v.get("net_inflow") or 0 for v in m) + (xm["adjustment"] if g == "crypto" else 0.0)   # cross matches are crypto↔crypto
-        groups[g] = {"total": t, "share": t / tot * 100 if tot else None, "exchanges": [k for k, v in ex.items() if v.get("present") and v.get("group") == g],
+        groups[g] = {"total": t, "share": t / tot * 100 if tot else None, "exchanges": members,
                      "net_inflow": net if m and n_ok else None, "pnl": (t - net) if m and n_ok else None,
                      "pnl_pct": ((t - net) / net * 100) if m and n_ok and net else None}
     res["combined"]["groups"] = groups
@@ -993,6 +1009,11 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
     if wl.get("present"):
         res["combined"]["method"] += f"鏈上錢包：自 {(wl.get('baseline') or {}).get('at', '')[:10]} 基準起算（公開 RPC／瀏覽器 API，無私鑰；出入金未自動辨識）。"
     res["ibkr"] = ib
+    res["robinhood"] = rh
+    if rh.get("present"):
+        res["combined"]["method"] += (f"Robinhood（無 API，截圖手動）：淨入金＝銀行入金 − 提領；價值"
+                                      + ("取自 Portfolio 截圖" if rh.get("value_method") == "portfolio_screenshot" else "為估算（公開美股價 × ECB 匯率）")
+                                      + f"，以 1 EUR ≈ {rh['usdt_per_eur']:.4f} USDT 換算；股票代幣＋現金歸證券，加密貨幣部分歸加密。")
     if ib.get("present"):
         res["combined"]["method"] += ((f"IBKR：開戶（{ib['flex'].get('account_start')}）以來的出入金來自 Flex Query（至 {ib['flex'].get('coverage_to')}），"
                                        if ib.get("pnl_method") == "flex" else

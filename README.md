@@ -131,3 +131,25 @@ The Bitget tab shows how far tokenized-stock rTokens (`rTSM`, `rSPCX`, … — l
 - Sell proceeds and fees since the baseline (BGB fee-deduct rows included), recent sells, re-buys and dual-investment
   settlements into rTokens; unreturned rToken freezes are flagged (they would otherwise look like sales).
 - Withdrawals off Bitget since the baseline are shown for context only (the ledger can't tie a withdrawal to a sale).
+
+### Robinhood (manual, screenshot-fed — no API)
+
+Robinhood EU has no API for this account, so the module works from your **History** screenshots:
+
+```bash
+# one line per History row (amount as shown; duplicates are skipped, so overlapping batches are safe)
+.venv/bin/python -m assetsboard robinhood-add "2026-01-05 buy ACME 0.5 40.00 -20.02"
+.venv/bin/python -m assetsboard robinhood-add "2026-02-02 market-sell XYZ 100 0.11 10.94"   # crypto
+.venv/bin/python -m assetsboard robinhood-add --stdin < batch.txt      # many lines; '#' = comment; qty ending in ~ = estimated
+.venv/bin/python -m assetsboard robinhood-import rows.csv              # same columns as robinhood_ledger.example.csv
+.venv/bin/python -m assetsboard robinhood-list
+.venv/bin/python -m assetsboard robinhood-set-portfolio 120.00 --cash 90.00 --crypto 10   # calibrate from a Portfolio screenshot
+```
+
+- Ledger: `archive/robinhood/ledger.csv` (gitignored). Example with fake data: `robinhood_ledger.example.csv`.
+- Value: stock tokens at public US prices (Yahoo, USD) ÷ EUR/USD (ECB via frankfurter) — an **estimate**, labeled as such —
+  unless a Portfolio screenshot (≤ 3 days old and newer than the last ledger row) is set; then that total is used.
+- Cash = deposits − withdrawals + sells + dividends − buys (+ sign-up rewards if `archive/robinhood/config.json` says
+  `"rewards_paid_as": "cash"`; default `crypto`). Crypto sold without a visible buy is treated as reward coins (cost 0).
+- PnL = value − net bank deposits (EUR), converted at the current EUR rate (so the % equals the EUR %).
+- Overview: stock tokens + cash count as **securities**, the crypto part as **crypto** (net deposits stay with securities).
