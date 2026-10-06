@@ -220,6 +220,7 @@ function renderBitget(){
    ${card("未實現",share(o.unrealized,base),amt(o.unrealized)+"　持倉 vs 成本")}
    ${card("無法歸類",share(o.unknown,base),amt(o.unknown)+"　uta／未標記／結算代幣")}
   </div>
+  ${(()=>{try{return rtokPanel()}catch(e){return '<div class="panel mut">rToken 出清進度顯示失敗：'+esc(e.message)+'</div>'}})()}
   <div class="panel"><h2>總資產：自動估算 vs App 顯示</h2>
    <div class="small">自動估算 ${amt(auto)}：${comp}</div>
    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px">
@@ -236,6 +237,28 @@ function renderBitget(){
    <div class="panel"><h2>資產配置</h2>${alloc()}</div></div>`;
   $("#bgsum").innerHTML=h;
 }
+function rtokPanel(){const R=D.rtoken_progress;if(!R)return "";
+  if(!R.present)return R.reason&&!/沒有 rToken/.test(R.reason)?`<div class="panel"><h2>rToken 出清進度</h2><div class="mut">${esc(R.reason)}</div></div>`:"";
+  const B=R.baseline||{},S=R.sells||{},RB=R.rebuys||{},OI=R.other_in||{},OO=R.other_out||{},F=R.after_baseline_flows||{},lp=R.liquidated_pct;
+  const pb=v=>v==null?"—":num(v,1)+"%";
+  const bar=`<div class="bar" style="height:12px;margin:8px 0 4px"><i style="width:${Math.max(0,Math.min(100,lp||0))}%;background:var(--up)"></i></div>
+   <div class="small mut">已出清 ${pb(lp)}　剩餘 ${pb(R.remaining_pct)}（以今日價格計：基準持倉 ${amt(B.value_now_prices)} → 現在 ${amt(R.current_value)}）</div>`;
+  let h=`<div class="panel"><h2>rToken 出清進度</h2>
+   <div class="cards">
+    ${card("已出清",pb(lp),"基準 "+esc((B.at||"").slice(0,10))+(B.pinned?"（手動指定）":"（持倉峰值）"))}
+    ${card("rToken 佔 Bitget",pb(R.pct_of_bitget),amt(R.current_value)+" / "+amt(R.bitget_total)+"　"+R.n_held+" 檔"+(R.n_dust?"＋"+R.n_dust+" 檔零頭":""))}
+    ${card("基準後賣出所得",amt(S.proceeds_usdt),(S.count||0)+" 筆　手續費 "+amt(S.fees_usdt,3)+"（"+(S.fee_rate_pct==null?"—":num(S.fee_rate_pct,3)+"%")+"）")}
+    ${card("淨出清金額",amt(R.net_proceeds_usdt),"賣出 − 買回 "+amt(RB.usdt)+(OI.usdt_then?" − 雙幣結算買入 "+amt(OI.usdt_then):""))}
+    ${card("基準後提領出 Bitget",amt(F.withdrawn_usdt),"佔淨出清 "+pb(F.withdrawn_vs_net_proceeds_pct)+"　（同期入金 "+amt(F.deposited_usdt)+"）<br><span class='small mut'>"+esc(F.note||"")+"</span>")}
+   </div>${bar}
+   <div class="small mut" style="margin-top:4px">基準：${esc(B.method||"")}；${esc((B.at||"").slice(0,16))} 當時市值 ${amt(B.value_then)}。名目市值峰值 ${amt((R.nominal_peak||{}).value)}（${esc(((R.nominal_peak||{}).at||"").slice(0,10))}）。可在 analysis_overrides.json 設定 <code>rtoken_baseline_date</code> 固定基準。</div>
+   ${OO.count?`<div class="note stale" style="margin-top:6px">⚠ 基準後有 ${OO.count} 筆 rToken 非交易減少尚未返還（約 ${amt(OO.usdt_then)}）：${esc(OO.note)}</div>`:""}`;
+  const T=R.tokens||[];
+  h+=`<div class="grid2"><div><h2 style="margin-top:12px">剩餘 rToken（${T.filter(t=>!t.dust).length} 檔）</h2><div style="overflow:auto;max-height:50vh"><table><tr><th>代幣</th><th>數量</th><th>價值</th><th>佔 rToken</th><th>佔 Bitget</th><th>基準數量</th><th>已賣</th></tr>${T.map(t=>`<tr${t.value<0.005?' class="mut"':""}><td>${esc(t.coin)}${t.dust?' <span class="tag">零頭</span>':""}</td><td>${qty(t.qty)}</td><td>${amt(t.value)}</td><td>${pb(t.pct_of_rtokens)}</td><td>${pb(t.pct_of_bitget)}</td><td>${qty(t.baseline_qty)}</td><td>${t.sold_pct==null?"新增":t.sold_pct<0?'<span class="down">+'+num(-t.sold_pct,0)+'%</span>':pb(t.sold_pct)}</td></tr>`).join("")}</table></div></div>
+   <div><h2 style="margin-top:12px">最近 rToken 賣出</h2><div style="overflow:auto;max-height:50vh"><table><tr><th>時間</th><th>代幣</th><th>數量</th><th>成交價</th><th>所得</th><th>手續費</th></tr>${(S.recent||[]).map(x=>`<tr><td>${esc((x.time||"").slice(5,16))}</td><td>${esc(x.coin)}</td><td>${qty(x.qty)}</td><td>${num(x.price,2)}</td><td>${amt(x.usdt)} <span class="small mut">${esc(x.received)}</span></td><td>${amt(x.fee_usdt,4)}</td></tr>`).join("")||'<tr><td colspan="6" class="mut l">（基準後尚無賣出）</td></tr>'}</table></div>
+   ${(RB.recent||[]).length||(OI.items||[]).length?`<details style="margin-top:8px"><summary class="small">基準後增加的 rToken：買回 ${RB.count||0} 筆、非交易 ${OI.count||0} 筆</summary><table><tr><th>時間</th><th>代幣</th><th>數量</th><th class="l">類型</th><th>USDT</th></tr>${[...(RB.recent||[]).map(x=>({...x,kind:"買回",usdt_then:x.usdt})),...(OI.items||[])].sort((a,b)=>(b.time||"").localeCompare(a.time||"")).map(x=>`<tr><td>${esc((x.time||"").slice(5,16))}</td><td>${esc(x.coin)}</td><td>${qty(x.qty)}</td><td class="l">${esc(x.kind)}</td><td>${amt(x.usdt_then)}</td></tr>`).join("")}</table><div class="small mut">${esc(OI.note||"")}</div></details>`:""}
+   </div></div></div>`;
+  return h}
 function pnlHero(){
   const C=D.combined||{}, G=C.groups||{}, crypto=G.crypto||{}, sec=G.securities||{};
   const pnl=C.pnl, pp=C.pnl_pct, tot=C.total, net=C.net_inflow;

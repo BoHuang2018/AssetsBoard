@@ -22,6 +22,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from . import pnl as pnl_mod
+from . import rtokens as rt_mod
 from . import valuation as val
 from .client import OSLO, SNAPSHOT_DIR, cli_cmd, ms_to_oslo, now_oslo, public_get
 
@@ -45,6 +46,7 @@ DEFAULT_OVERRIDES = {
     "running_spot_bots_funded_usdt": None,
     "mexc_earn_usdt": None,                 # MEXC Earn balance (no API; typed on the MEXC tab), fixed USDT value
     "mexc_earn_set_at": None,               # ISO time it was entered (stale after 30 days)
+    "rtoken_baseline_date": None,           # optional YYYY-MM-DD: pin the rToken liquidation baseline (default: peak basket)
 }
 CATEGORY_NAMES = {
     "spot": "現貨交易（已實現）", "spot_bots": "現貨機器人（已關閉）", "futures_bots": "合約機器人（已關閉）",
@@ -740,8 +742,13 @@ def compute(arch: dict, snap: dict, prices: Prices, tickers: dict, ov: dict) -> 
         "snapshot_time": snap.get("captured_oslo"), "prices": "live tickers" if tickers else "cached daily close",
         "uta_window": "transfer_records since archive start (~90 days before first archive run)",
     }
+    try:   # rToken liquidation progress (never breaks the main analysis)
+        rtoken = rt_mod.progress(rows, dict(actual), cur, px, est_total, ext, ov)
+    except Exception as e:  # noqa: BLE001
+        rtoken = {"present": False, "reason": f"rToken 進度計算失敗：{type(e).__name__}: {e}"[:300]}
     first = rows[0]["ts"] if rows else None
     return {
+        "rtoken_progress": rtoken,
         "overview": overview, "holdings": holdings, "categories": categories, "realized_by_coin": coin_rows,
         "dual_conversions": dual_conv, "spot_bot_episodes": episodes, "unmatched_bot_fundings": unmatched_fund,
         "futures": {"by_type": dict(fsum), "bots_net_flow": fb_net, "running_value": run_fb_value, "running_funded": run_fb_fund,
