@@ -375,35 +375,51 @@ def analyze(project: Path, root: Path | None = None, offline: bool = False) -> d
             crypto_eur += h["value_eur"]
         else:
             stock_eur += h["value_eur"]
-    crypto_eur += d["unknown_reward_coins_left_eur"]
-    est_total = stock_eur + crypto_eur + d["cash_eur"]
+    known_crypto_eur = crypto_eur
     last_date = max(r["date"] for r in rows)
     pf = load_portfolio(root)
     use_pf = False
+    reward_crypto_eur, reward_crypto_src = d["unknown_reward_coins_left_eur"], "receipt"   # placeholder: value when received
     if pf and pf.get("total_eur") is not None:
         pf_date = str(pf.get("at", ""))[:10]
         age = (now_oslo().date() - dt.date.fromisoformat(pf_date)).days if pf_date else 999
         pf["age_days"] = age
         pf["stale"] = pf_date < last_date or age > PORTFOLIO_FRESH_DAYS
         use_pf = not pf["stale"]
+        # unidentified reward crypto = Portfolio total − cash − stock tokens (estimate) − crypto with known qty
+        if pf.get("crypto_eur") is not None:
+            implied = max(0.0, float(pf["crypto_eur"]) - known_crypto_eur); src = "portfolio_crypto"   # crypto_eur = all crypto
+        elif pf.get("cash_eur") is not None:
+            implied = max(0.0, float(pf["total_eur"]) - float(pf["cash_eur"]) - stock_eur - known_crypto_eur); src = "portfolio_implied"
+        else:
+            implied = None; src = None
+        if implied is not None and (d["unknown_reward_coins_left"] or src == "portfolio_crypto"):
+            pf["implied_reward_crypto_eur"] = implied
+            reward_crypto_eur, reward_crypto_src = implied, src
+    crypto_eur = known_crypto_eur + reward_crypto_eur
+    est_total = stock_eur + crypto_eur + d["cash_eur"]
     total_eur = float(pf["total_eur"]) if use_pf else est_total
     net = d["net_deposits_eur"]
     pnl_eur = total_eur - net
     rate = (eur_usd or 0.0) * (P.get("usdt_per_usd") or 1.0)        # USDT per EUR
-    crypto_part = (float(pf["crypto_eur"]) if use_pf and pf.get("crypto_eur") is not None else crypto_eur)
+    crypto_part = crypto_eur
     stock_cost = sum(h["cost_eur"] for h in d["holdings"] if h["kind"] == "stock")
     stock_real = sum(v for a, v in d["realized_eur"].items() if d["kinds"].get(a) == "stock")
     unk_proceeds = sum(-u["eur"] if u["eur"] < 0 else u["eur"] for u in d["unknown_cost_sells"])
     n_sold_rewards = len(d["sold_unknown_assets"]) if cfg.get("rewards_paid_as", "crypto") != "cash" else 0
     sold_receipt = sum(x["eur"] for x in d["rewards_unknown"][:n_sold_rewards])
     breakdown = {"rewards_received_eur": d["rewards_eur"], "reward_crypto_sold_vs_receipt_eur": unk_proceeds - sold_receipt if n_sold_rewards else unk_proceeds,
+                 "reward_crypto_held_vs_receipt_eur": reward_crypto_eur - d["unknown_reward_coins_left_eur"],
                  "stock_realized_eur": stock_real, "stock_unrealized_eur": stock_eur - stock_cost, "dividends_eur": d["dividends_eur"]}
     breakdown["other_eur"] = (total_eur - net) - sum(breakdown.values())   # screenshot vs estimate, crypto price moves, rounding
     unknowns = []
     if d["sold_unknown_assets"]:
         unknowns.append(f"加密貨幣賣出但 History 沒有買入：{', '.join(d['sold_unknown_assets'])} —— 推測來自 sign-up reward（History 只顯示 €），成本視為 0（獎勵），已實現收益＝賣出所得。")
-    if d["unknown_reward_coins_left"]:
+    if d["unknown_reward_coins_left"] and reward_crypto_src == "receipt":
         unknowns.append(f"還有 {d['unknown_reward_coins_left']} 筆 sign-up reward 的幣種未知（可能仍持有），暫以領取時 €{d['unknown_reward_coins_left_eur']:.2f} 計入，非市價。")
+    elif reward_crypto_src == "portfolio_implied":
+        unknowns.append(f"獎勵加密貨幣（{d['unknown_reward_coins_left']} 筆 sign-up reward，幣種未逐一列出；成本 €0）＝ Portfolio 總值 − 現金 − 股票代幣估值 ＝ "
+                        f"€{reward_crypto_eur:.2f}（{str(pf.get('at', ''))[:16]} 截圖{'' if use_pf else '，已過期：沿用此值'}）。")
     est = [f"{r['date']} {r['type']} {r['asset']} 數量 {r['qty']}（推算：截圖被遮住）" for r in rows if r["qty_estimated"]]
     if est:
         unknowns.append("推算的數量：" + "；".join(est))
@@ -419,7 +435,8 @@ def analyze(project: Path, root: Path | None = None, offline: bool = False) -> d
         **{k: d[k] for k in ("cash_eur", "deposits_eur", "withdrawals_eur", "net_deposits_eur", "rewards_eur", "dividends_eur",
                              "fees_eur", "implied_fees_eur", "realized_eur", "unknown_cost_sells", "rewards_unknown",
                              "unknown_reward_coins_left", "unknown_reward_coins_left_eur", "cash_if_rewards_cash_eur")},
-        "holdings": d["holdings"], "stock_eur": stock_eur, "crypto_eur": crypto_eur,
+        "holdings": d["holdings"], "stock_eur": stock_eur, "crypto_eur": crypto_eur, "known_crypto_eur": known_crypto_eur,
+        "reward_crypto_eur": reward_crypto_eur, "reward_crypto_source": reward_crypto_src,
         "est_total_eur": est_total, "total_eur": total_eur, "value_method": "portfolio_screenshot" if use_pf else "estimate",
         "portfolio": pf, "pnl_eur": pnl_eur, "pnl_breakdown": breakdown,
         "pnl_ex_rewards_eur": pnl_eur - d["rewards_eur"], "pnl_pct": pnl_eur / net * 100 if net > 0 else None,

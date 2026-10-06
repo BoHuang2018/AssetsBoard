@@ -362,11 +362,12 @@ function renderRobinhood(){const R=D.robinhood||{},el=$("#rh");
   const hs=R.holdings||[];
   h+=`<div class="grid2"><div class="panel"><h2>持倉（由紀錄推算；價格${est?"＝公開美股價換 EUR，估算":"僅供參考"}）</h2><table><tr><th>資產</th><th class="l">類別</th><th>數量</th><th>均價</th><th>現價</th><th>價值</th><th>未實現</th></tr>
    ${hs.map(x=>`<tr><td>${esc(x.asset)}${x.qty_estimated?' <span class="stale" title="部分數量被截圖遮住，依金額／價格推算">~</span>':""}</td><td class="l small">${x.kind==="stock"?"股票代幣":x.kind==="crypto"?"加密":esc(x.kind)}</td><td>${qty(x.qty)}</td><td>${eur(x.avg_cost_eur)}</td><td>${x.price_eur==null?'<span class="warn">無報價</span>':eur(x.price_eur)}</td><td>${eur(x.value_eur)}</td><td>${x.unrealized_eur==null?"—":eur(x.unrealized_eur)+" "+pct(x.unrealized_pct)}</td></tr>`).join("")}
-   ${R.unknown_reward_coins_left?`<tr><td>？×${R.unknown_reward_coins_left}</td><td class="l small">加密（sign-up 獎勵，幣種未知）</td><td>—</td><td>€0</td><td class="mut">—</td><td>${eur(R.unknown_reward_coins_left_eur)}</td><td class="mut small">以領取時金額暫計</td></tr>`:""}
+   ${R.unknown_reward_coins_left?`<tr><td>獎勵幣 ×${R.unknown_reward_coins_left}</td><td class="l small">加密（sign-up 獎勵）</td><td>—</td><td>€0</td><td class="mut">—</td><td>${eur(R.reward_crypto_eur)}</td><td class="mut small">${R.reward_crypto_source==="receipt"?"以領取時金額暫計":R.reward_crypto_source==="portfolio_implied"?"Portfolio 總值 − 現金 − 股票（推算）；成本 €0":"Portfolio 截圖"}</td></tr>`:""}
    <tr><td>現金</td><td class="l small">EUR</td><td></td><td></td><td></td><td>${eur(R.cash_eur)}</td><td class="mut small">推算</td></tr></table>
    <h2 style="margin-top:12px">盈虧組成</h2><table>
    <tr><td class="l">sign-up 獎勵（領取時）</td><td>${eur(B.rewards_received_eur)}</td></tr>
    <tr><td class="l">獎勵幣賣出 vs 領取時</td><td>${eur(B.reward_crypto_sold_vs_receipt_eur)}</td></tr>
+   ${Math.abs(B.reward_crypto_held_vs_receipt_eur||0)>0.005?`<tr><td class="l">仍持有的獎勵幣 vs 領取時</td><td>${eur(B.reward_crypto_held_vs_receipt_eur)}</td></tr>`:""}
    <tr><td class="l">股票代幣已實現</td><td>${eur(B.stock_realized_eur)}</td></tr>
    <tr><td class="l">股票代幣未實現</td><td>${eur(B.stock_unrealized_eur)}</td></tr>
    <tr><td class="l">股息</td><td>${eur(B.dividends_eur)}</td></tr>

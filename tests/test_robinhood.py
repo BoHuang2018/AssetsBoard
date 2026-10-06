@@ -77,3 +77,26 @@ def test_analyze_offline_with_cached_prices_and_portfolio(tmp_path: Path, monkey
 
 def test_empty(tmp_path: Path):
     assert rh.analyze(tmp_path, tmp_path / "rh", offline=True)["present"] is False
+
+
+def test_portfolio_implies_reward_crypto(tmp_path: Path, monkeypatch):
+    root = tmp_path / "archive" / "robinhood"
+    rh.add_rows(root, [rh.parse_line(l) for l in (
+        "2026-03-01 deposit 100", "2026-03-01 reward 10", "2026-03-01 reward 10",
+        "2026-03-02 buy ACME 1 50 -50.02", "2026-03-03 market-sell XYZ 10 1.2 11.94")])
+    (root / "prices.json").write_text(json.dumps({"eur_usd": 1.0, "usdt_per_usd": 1.0, "fx_source": "test",
+                                                  "usd": {"ACME": 60.0}, "src": {}}), encoding="utf-8")
+    a = rh.analyze(tmp_path, root, offline=True)
+    assert a["unknown_reward_coins_left"] == 1 and a["reward_crypto_source"] == "receipt" and a["reward_crypto_eur"] == 10.0
+    monkeypatch.setattr(rh, "now_oslo", lambda: __import__("datetime").datetime(2026, 3, 4, 12, tzinfo=rh.OSLO))
+    rh.save_portfolio(root, 135.0, cash_eur=61.92, at="2026-03-04T10:58+02:00")
+    b = rh.analyze(tmp_path, root, offline=True)
+    # implied reward crypto = 135 − 61.92 − 60 (ACME) = 13.08; cost 0
+    assert b["value_method"] == "portfolio_screenshot" and b["reward_crypto_source"] == "portfolio_implied"
+    assert abs(b["reward_crypto_eur"] - 13.08) < 1e-9 and abs(b["split"]["crypto"] - 13.08) < 1e-9
+    assert abs(b["pnl_eur"] - 35.0) < 1e-9
+    assert abs(sum(b["pnl_breakdown"].values()) - b["pnl_eur"]) < 1e-9 and abs(b["pnl_breakdown"]["other_eur"]) < 1e-9
+    # once stale, the estimate keeps the implied crypto value instead of the receipt placeholder
+    monkeypatch.setattr(rh, "now_oslo", lambda: __import__("datetime").datetime(2026, 3, 20, 12, tzinfo=rh.OSLO))
+    c = rh.analyze(tmp_path, root, offline=True)
+    assert c["value_method"] == "estimate" and abs(c["reward_crypto_eur"] - 13.08) < 1e-9
