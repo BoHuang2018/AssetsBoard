@@ -119,3 +119,15 @@ The weekly LaunchAgent does **not** open or query IB Gateway. For live NAV/posit
 2. Ask AssetsBoard to refresh, or run `archive --exchange ibkr`.
 
 **Flex Query** (deposits, dividends, fees, history) still runs **monthly** via HTTP (`ibkr-flex-fetch`) in `tools/weekly_archive.sh` and does **not** need Gateway.
+
+### Bitget rToken 出清進度 (liquidation progress)
+
+The Bitget tab shows how far tokenized-stock rTokens (`rTSM`, `rSPCX`, … — lowercase `r` + ticker) have been sold down:
+
+- **Baseline** (default): the moment the rToken basket was largest *at today's prices*, rebuilt backwards from current
+  holdings through the all-time tax ledger — price-neutral, so progress only moves when you sell or buy.
+  Pin it with `"rtoken_baseline_date": "YYYY-MM-DD"` in `snapshots/analysis_overrides.json`.
+- **% liquidated** = 1 − current rToken value ÷ baseline basket at today's prices; **rToken share of Bitget** total.
+- Sell proceeds and fees since the baseline (BGB fee-deduct rows included), recent sells, re-buys and dual-investment
+  settlements into rTokens; unreturned rToken freezes are flagged (they would otherwise look like sales).
+- Withdrawals off Bitget since the baseline are shown for context only (the ledger can't tie a withdrawal to a sale).
