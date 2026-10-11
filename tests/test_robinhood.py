@@ -68,6 +68,10 @@ def test_analyze_offline_with_cached_prices_and_portfolio(tmp_path: Path, monkey
     assert abs(a["total"] - a["total_eur"] * 1.25) < 1e-6
     assert abs(sum(a["split"].values()) - a["total"]) < 1e-6 and abs(a["split"]["crypto"] - 12.5) < 1e-6
     assert abs(sum(a["pnl_breakdown"].values()) - a["pnl_eur"]) < 1e-6
+    # net deposits split: cost of bought crypto → crypto, rest → securities
+    btc_cost = sum(h["cost_eur"] for h in a["holdings"] if h["kind"] == "crypto")
+    assert abs(a["split_net"]["crypto"] - btc_cost * 1.25) < 1e-6
+    assert abs(sum(a["split_net"].values()) - a["net_inflow"]) < 1e-6
     # a fresh Portfolio screenshot wins over the estimate
     monkeypatch.setattr(rh, "now_oslo", lambda: __import__("datetime").datetime(2026, 2, 16, 12, tzinfo=rh.OSLO))
     rh.save_portfolio(root, 120.0, cash_eur=92.88, crypto_eur=11.0, at="2026-02-16T12:00")
@@ -94,9 +98,31 @@ def test_portfolio_implies_reward_crypto(tmp_path: Path, monkeypatch):
     # implied reward crypto = 135 − 61.92 − 60 (ACME) = 13.08; cost 0
     assert b["value_method"] == "portfolio_screenshot" and b["reward_crypto_source"] == "portfolio_implied"
     assert abs(b["reward_crypto_eur"] - 13.08) < 1e-9 and abs(b["split"]["crypto"] - 13.08) < 1e-9
+    assert b["split_net"]["crypto"] == 0.0 and abs(b["split_net"]["securities"] - 100.0) < 1e-9   # reward coins: no deposit
     assert abs(b["pnl_eur"] - 35.0) < 1e-9
     assert abs(sum(b["pnl_breakdown"].values()) - b["pnl_eur"]) < 1e-9 and abs(b["pnl_breakdown"]["other_eur"]) < 1e-9
     # once stale, the estimate keeps the implied crypto value instead of the receipt placeholder
     monkeypatch.setattr(rh, "now_oslo", lambda: __import__("datetime").datetime(2026, 3, 20, 12, tzinfo=rh.OSLO))
     c = rh.analyze(tmp_path, root, offline=True)
     assert c["value_method"] == "estimate" and abs(c["reward_crypto_eur"] - 13.08) < 1e-9
+
+
+def test_stake_is_not_cash_and_round_trip_trade():
+    rows = [rh.parse_line(x) for x in [
+        "2026-01-01 deposit 100",
+        "2026-01-02 market-buy ETH 0.02 2000 -40.10",
+        "2026-01-02 stake ETH 0.02 40.00",
+        "2026-01-03 market-buy XYZ 100 0.10 -10.05",
+        "2026-01-04 market-sell XYZ 100 0.12 11.95",
+        "2026-01-05 token-buy ABCX 1 10 -10.00",
+    ]]
+    assert rows[2]["type"] == "stake" and rows[2]["kind"] == "crypto" and rows[2]["amount_eur"] == "40.00"
+    assert rows[5]["kind"] == "stock"                          # token-* = securities even for leveraged/ETF-like tokens
+    d = rh.derive(rows)
+    assert abs(d["cash_eur"] - (100 - 40.10 - 10.05 + 11.95 - 10.00)) < 1e-9   # stake moved no cash
+    eth = next(h for h in d["holdings"] if h["asset"] == "ETH")
+    assert abs(eth["qty"] - 0.02) < 1e-12 and abs(eth["staked_qty"] - 0.02) < 1e-12 and eth["kind"] == "crypto"
+    assert abs(d["realized_eur"]["XYZ"] - 1.90) < 1e-9 and not d["unknown_cost_sells"]
+    assert {h["asset"] for h in d["holdings"]} == {"ETH", "ABCX"}
+    with pytest.raises(rh.LedgerError):
+        rh.parse_line("2026-01-02 stake ETH 40.00")

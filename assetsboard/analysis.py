@@ -892,7 +892,7 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
         rh = {"present": False, "configured": False, "reason": f"Robinhood 分析失敗：{type(e).__name__}: {e}"[:300]}
     ex["robinhood"] = {k: rh.get(k) for k in ("present", "configured", "reason", "total", "net_inflow", "pnl", "pnl_pct",
                                                "snapshot_time", "split", "total_eur", "pnl_eur", "net_deposits_eur",
-                                               "value_method", "usdt_per_eur", "last_date")}
+                                               "value_method", "usdt_per_eur", "last_date", "split_net")}
     for k, v in ex.items():
         if k in ("ibkr", "robinhood"):   # Robinhood: stock tokens (+ cash) → securities; its crypto part is split out below
             v["group"] = "securities"
@@ -932,7 +932,7 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
     groups = {}
     for g in ("crypto", "securities"):
         # an account with `split` (Robinhood: stock tokens + crypto) contributes each part's value to its group;
-        # its net deposits stay with its primary group (rewards/crypto had no deposit of their own).
+        # its net deposits go with its primary group unless it gives `split_net` (Robinhood: cost of bought crypto → crypto).
         m = [v for v in ex.values() if v.get("present") and v.get("group") == g]
         t = 0.0; members = []
         for k, v in ex.items():
@@ -942,7 +942,9 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
             if v.get("group") == g or abs(part) > 0.005:
                 t += part; members.append(k)
         n_ok = all(v.get("net_inflow") is not None for v in m)
-        net = sum(v.get("net_inflow") or 0 for v in m) + (xm["adjustment"] if g == "crypto" else 0.0)   # cross matches are crypto↔crypto
+        net = sum(v.get("net_inflow") or 0 for v in m if not v.get("split_net")) + (xm["adjustment"] if g == "crypto" else 0.0)   # cross matches are crypto↔crypto
+        net += sum(v["split_net"].get(g) or 0.0 for v in ex.values()
+                   if v.get("present") and v.get("split_net") and v.get("net_inflow") is not None)
         groups[g] = {"total": t, "share": t / tot * 100 if tot else None, "exchanges": members,
                      "net_inflow": net if m and n_ok else None, "pnl": (t - net) if m and n_ok else None,
                      "pnl_pct": ((t - net) / net * 100) if m and n_ok and net else None}

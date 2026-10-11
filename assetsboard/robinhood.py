@@ -33,7 +33,8 @@ from pathlib import Path
 from .client import OSLO, cli_cmd, now_oslo
 
 FIELDS = ("date", "type", "asset", "kind", "qty", "price_eur", "amount_eur", "qty_estimated", "note")
-TYPES = ("deposit", "withdrawal", "reward", "buy", "sell", "dividend", "fee", "other")
+TYPES = ("deposit", "withdrawal", "reward", "buy", "sell", "dividend", "fee", "other", "stake", "unstake")
+NON_CASH = ("stake", "unstake")   # internal: coin stays held (staked); amount = value shown, not a cash flow
 KINDS = ("stock", "crypto", "cash")
 KNOWN_CRYPTO = {"BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "DOT", "LTC", "BCH", "UNI", "AAVE", "SHIB", "PEPE",
                 "ARB", "OP", "SUI", "TON", "XLM", "USDC", "USDT", "POL", "XTZ", "COMP", "CRV", "WIF", "BONK"}
@@ -79,7 +80,7 @@ def normalize(row: dict) -> dict:
     if amt is None:
         raise LedgerError("缺少金額 amount_eur")
     # sign convention from History: money in +, money out −
-    if t in ("deposit", "reward", "sell", "dividend"):
+    if t in ("deposit", "reward", "sell", "dividend") or t in NON_CASH:
         amt = abs(amt)
     elif t in ("withdrawal", "buy", "fee"):
         amt = -abs(amt)
@@ -96,6 +97,10 @@ def normalize(row: dict) -> dict:
         r["kind"] = r["kind"] or "cash"
     elif t == "dividend":
         r["kind"] = r["kind"] or "stock"
+    elif t in NON_CASH:
+        if not r["asset"]:
+            raise LedgerError("質押紀錄需要 asset")
+        r["kind"] = r["kind"] or "crypto"
     elif t == "reward":
         r["kind"] = r["kind"] or ("crypto" if r["asset"] and r["asset"] in KNOWN_CRYPTO or r["qty"] else "")
     if r["kind"] and r["kind"] not in KINDS:
@@ -166,6 +171,10 @@ def parse_line(line: str) -> dict:
                    qty_estimated="1" if rest[1].endswith("~") else "")
     elif base in ("dividend",):
         row.update(asset=rest[0], amount_eur=rest[-1])
+    elif base in NON_CASH:                             # stake ASSET QTY AMOUNT (e.g. "stake ETH 0.021466 48.86")
+        if len(rest) != 3:
+            raise LedgerError(f"質押需要 ASSET QTY AMOUNT：{line!r}")
+        row.update(asset=rest[0], qty=rest[1], amount_eur=rest[2], kind="crypto")
     elif base == "reward" and len(rest) >= 3:          # reward ASSET QTY AMOUNT (coin known)
         row.update(asset=rest[0], qty=rest[1], amount_eur=rest[-1], kind="crypto")
     else:
@@ -285,7 +294,7 @@ def fetch_prices(stocks: list[str], cryptos: list[str], cache_path: Path | None 
 def derive(rows: list[dict], rewards_paid_as: str = "crypto") -> dict:
     """Pure: holdings (average cost, EUR), cash estimate, flows, implied fees, unknowns. No prices."""
     pos: dict = defaultdict(lambda: {"qty": 0.0, "cost": 0.0, "kind": "", "realized": 0.0, "qty_estimated": False,
-                                     "buys": 0, "sells": 0, "unknown_cost_qty": 0.0})
+                                     "buys": 0, "sells": 0, "unknown_cost_qty": 0.0, "staked": 0.0})
     cash = 0.0; dep = wd = rew = div = fee_rows = implied_fees = 0.0
     rewards_unknown: list[dict] = []
     unknown_sells: list[dict] = []
@@ -328,6 +337,9 @@ def derive(rows: list[dict], rewards_paid_as: str = "crypto") -> dict:
                 p["cost"] -= avg * take; p["qty"] -= take
         elif t == "other":
             cash += amt
+        elif t in NON_CASH:                     # internal: no cash, no quantity change — only marks it as staked
+            p = pos[a]; p["kind"] = p["kind"] or "crypto"
+            p["staked"] = max(0.0, p["staked"] + (q if t == "stake" else -q))
     # crypto sold without a visible acquisition: most likely the sign-up rewards (coin unknown in History)
     sold_unknown_assets = sorted({u["asset"] for u in unknown_sells})
     n_left = max(0, len(rewards_unknown) - len(sold_unknown_assets)) if rewards_paid_as != "cash" else 0
@@ -336,7 +348,8 @@ def derive(rows: list[dict], rewards_paid_as: str = "crypto") -> dict:
     for a, p in sorted(pos.items()):
         if p["qty"] > 1e-9:
             holdings.append({"asset": a, "kind": p["kind"], "qty": p["qty"], "cost_eur": p["cost"],
-                             "avg_cost_eur": p["cost"] / p["qty"], "realized_eur": p["realized"], "qty_estimated": p["qty_estimated"]})
+                             "avg_cost_eur": p["cost"] / p["qty"], "realized_eur": p["realized"], "qty_estimated": p["qty_estimated"],
+                             "staked_qty": min(p["staked"], p["qty"])})
     realized = {a: p["realized"] for a, p in pos.items() if abs(p["realized"]) > 0.004}
     kinds = {a: p["kind"] for a, p in pos.items()}
     return {"holdings": holdings, "cash_eur": cash, "deposits_eur": dep, "withdrawals_eur": wd, "net_deposits_eur": dep - wd,
@@ -376,6 +389,7 @@ def analyze(project: Path, root: Path | None = None, offline: bool = False) -> d
         else:
             stock_eur += h["value_eur"]
     known_crypto_eur = crypto_eur
+    crypto_cost = sum(h["cost_eur"] for h in d["holdings"] if h["kind"] == "crypto")
     last_date = max(r["date"] for r in rows)
     pf = load_portfolio(root)
     use_pf = False
@@ -443,6 +457,10 @@ def analyze(project: Path, root: Path | None = None, offline: bool = False) -> d
         "eur_usd": eur_usd, "fx_source": P.get("fx_source"), "usdt_per_eur": rate, "prices_at": P.get("at"),
         "total": total_eur * rate, "net_inflow": net * rate, "pnl": pnl_eur * rate,
         "split": {"securities": (total_eur - crypto_part) * rate, "crypto": crypto_part * rate},
+        # deposited cash that now sits in bought crypto (cost of held crypto; reward coins cost 0) counts as crypto inflow,
+        # so the crypto/securities PnL split isn't skewed by crypto bought with Robinhood cash
+        "split_net": {"crypto": crypto_cost * rate, "securities": (net - crypto_cost) * rate},
+        "crypto_cost_eur": crypto_cost,
         "rewards_paid_as": cfg.get("rewards_paid_as", "crypto"),
         "snapshot_time": (pf.get("at") if use_pf else P.get("at")) or last_date,
         "unknowns": unknowns,

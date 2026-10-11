@@ -152,6 +152,7 @@ Robinhood EU has no API for this account, so the module works from your **Histor
 .venv/bin/python -m assetsboard robinhood-add "2026-01-05 buy ACME 0.5 40.00 -20.02"
 .venv/bin/python -m assetsboard robinhood-add "2026-02-02 market-sell XYZ 100 0.11 10.94"   # crypto
 .venv/bin/python -m assetsboard robinhood-add --stdin < batch.txt      # many lines; '#' = comment; qty ending in ~ = estimated
+.venv/bin/python -m assetsboard robinhood-add "2026-01-07 stake ETH 0.02 40.00"            # staking: no cash, coin stays held
 .venv/bin/python -m assetsboard robinhood-import rows.csv              # same columns as robinhood_ledger.example.csv
 .venv/bin/python -m assetsboard robinhood-list
 .venv/bin/python -m assetsboard robinhood-set-portfolio 120.00 --cash 90.00 --crypto 10   # calibrate from a Portfolio screenshot
@@ -163,4 +164,4 @@ Robinhood EU has no API for this account, so the module works from your **Histor
 - Cash = deposits − withdrawals + sells + dividends − buys (+ sign-up rewards if `archive/robinhood/config.json` says
   `"rewards_paid_as": "cash"`; default `crypto`). Crypto sold without a visible buy is treated as reward coins (cost 0).
 - PnL = value − net bank deposits (EUR), converted at the current EUR rate (so the % equals the EUR %).
-- Overview: stock tokens + cash count as **securities**, the crypto part as **crypto** (net deposits stay with securities).
+- Overview: stock tokens + cash count as **securities**, the crypto part as **crypto**. Net deposits are split the same way: the cost of crypto bought with Robinhood cash counts as crypto inflow (reward coins cost 0), the rest stays with securities.
