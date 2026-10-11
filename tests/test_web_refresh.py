@@ -187,3 +187,17 @@ class WalletMessage(unittest.TestCase):
         self.assertIn("沿用 10-11 12:00", msg)
         self.assertEqual(web.wallets_message({"total_usdt": 5.0, "wallets": [{"id": "a"}]})[0], "ok")
 
+
+
+class MexcRefused(unittest.TestCase):
+    def test_700001_explains_instead_of_blaming_the_key(self):
+        from assetsboard import mexc
+        td = tempfile.TemporaryDirectory(); self.addCleanup(td.cleanup)
+        st = web.State(Path(td.name)); marks = []
+        rep = {"sources": {}, "errors": {"snapshot": [{"code": 700001, "msg": "700001 API-key format invalid"}]}}
+        with mock.patch.object(mexc, "available", return_value=True), mock.patch.object(mexc, "MexcClient", return_value=object()), \
+                mock.patch.object(mexc, "archive_run", return_value=rep):
+            web.FETCH["mexc"](st, lambda k, s, m="": marks.append((k, s, m)), True)
+        k, s, m = marks[-1]
+        self.assertEqual((k, s), ("mexc", "failed"))
+        self.assertIn("700001", m); self.assertIn("鑰匙圈內容正確", m); self.assertNotIn("換一組", m)

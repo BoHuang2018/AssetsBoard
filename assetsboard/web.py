@@ -159,7 +159,7 @@ def _marker(st: State):
             now = now_oslo().isoformat(timespec="seconds")
             if status == "running" and "_t0" not in S:
                 S["_t0"] = time.time()
-            S.update(status=status, msg=msg[:220], at=now, running=status == "running")
+            S.update(status=status, msg=msg[:300], at=now, running=status == "running")
             if status != "running":
                 if "_t0" in S:
                     S["duration_s"] = round(time.time() - S.pop("_t0"), 1)
@@ -209,6 +209,13 @@ def _fetch_simple(key: str, modname: str, cls: str):
         errs = r.get("errors") or {}
         if "snapshot" in errs:
             why = "; ".join(str(x.get("msg", "")) for x in errs["snapshot"] if isinstance(x, dict))[:140]
+            if key == "mexc" and "700001" in why:
+                # MEXC knows this key (an unknown key gets 10072) but its spot API refuses it; the Keychain value matches
+                # the key shown on MEXC's API page, and the same key still works on MEXC's futures API.
+                mark(key, "failed", "持倉讀取失敗，畫面沿用上次資料：MEXC 現貨 API 拒絕這把金鑰（700001 API-key format invalid）。"
+                     "金鑰已被 MEXC 認得、鑰匙圈內容正確；請到 MEXC「API 管理」確認現貨「帳戶資訊（讀取）」權限，"
+                     "或關閉 Zscaler／換網路後再按「⟳ 更新」，仍不行就重建一把唯讀金鑰")
+                return
             mark(key, "failed", "持倉讀取失敗，畫面沿用上次資料" + (f"：{why}" if why else "")
                  + ("（API 金鑰無效／過期 → 換一組唯讀金鑰）" if any(w in why.lower() for w in ("api-key", "apikey", "api key", "signature", "invalid")) else ""))
         elif errs or r.get("warning"):

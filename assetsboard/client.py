@@ -68,8 +68,26 @@ def keychain_read(name: str, timeout: float = 120) -> str:
         except (OSError, subprocess.TimeoutExpired):
             continue
         if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
+            return clean_keychain_value(r.stdout)
     return ""
+
+
+def clean_keychain_value(out: str) -> str:
+    """`security find-generic-password -w` prints the password, or its HEX encoding when the stored bytes are not
+    plain text (e.g. a value pasted with a trailing newline/tab). Undo that, and strip surrounding whitespace.
+    A genuine hex secret (Bitget/MEXC secrets are hex) is kept: it is only decoded when the bytes contain whitespace
+    or control characters and are otherwise printable ASCII — random hex bytes practically never are."""
+    v = out.strip()
+    if len(v) >= 8 and len(v) % 2 == 0 and all(c in "0123456789abcdefABCDEF" for c in v):
+        try:
+            raw = bytes.fromhex(v).decode("ascii")
+        except (ValueError, UnicodeDecodeError):
+            return v
+        inner = raw.strip()
+        if raw != inner or any(ord(c) < 32 for c in raw):
+            if inner and all(32 < ord(c) < 127 for c in inner):
+                return inner
+    return v
 
 
 def keychain_has(name: str, legacy: bool = True) -> bool:
