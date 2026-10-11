@@ -8,6 +8,7 @@ deduplicated by a stable key (billId / tradeId / orderId / … or a hash of the 
 """
 from __future__ import annotations
 
+import concurrent.futures as cf
 import datetime as dt
 import hashlib
 import json
@@ -25,6 +26,7 @@ DEEP_START = dt.date(2026, 3, 1)     # first-run start for sources with long his
 RECENT_DAYS = 89                      # sources that refuse startTime older than ~90 days
 OVERLAP = 2 * DAY                     # re-read this much before the last window end (late/pending records)
 FUTURES_TYPES = hold.FUTURES_TYPES
+FETCH_WORKERS = 4                     # concurrent read-only history requests (Bitget allows ~10/s per endpoint)
 COMMON_COINS = ("USDT", "USDC", "BTC", "ETH", "BGB")
 
 # name, path, extra params, window ms, lookback ("deep"|"recent"), key fields, time fields, limit, cursor param
@@ -219,8 +221,10 @@ def _transfer_coins(c: Client, store: Store) -> list[str]:
     return sorted(x for x in coins if x and x != "None" and x.isalnum())
 
 
-def run(c: Client, root: Path, since: dt.date | None = None, progress: bool = True, on_step=None) -> dict:
-    """on_step(label, done, total) is called after each source (for UI progress)."""
+def run(c: Client, root: Path, since: dt.date | None = None, progress: bool = True, on_step=None,
+        workers: int = FETCH_WORKERS) -> dict:
+    """on_step(label, done, total) is called after each source (for UI progress). History sources are fetched
+    `workers` at a time (results are stored in the same order as before), the holdings snapshot alongside."""
     t0 = time.time()
     root.mkdir(parents=True, exist_ok=True)
     state_path = root / "state.json"
@@ -230,11 +234,8 @@ def run(c: Client, root: Path, since: dt.date | None = None, progress: bool = Tr
     now_ms = int(t.timestamp() * 1000)
     report: dict = {"captured_oslo": t.isoformat(timespec="seconds"), "root": str(root), "sources": {}, "errors": {}}
 
-    def one(src: dict, label: str) -> None:
-        sk = label
+    def commit(src: dict, sk: str, start: int, rows: list, errs: list, calls: int) -> None:
         st = state["sources"].setdefault(sk, {})
-        start = _start_for(src, st, since, now_ms)
-        rows, errs, calls = fetch(c, src, start, now_ms)
         added, dup, mx = store.add(src, rows)
         agg = report["sources"].setdefault(src["name"], {"fetched": 0, "added": 0, "duplicates": 0, "calls": 0, "parts": 0, "from": None})
         agg["fetched"] += len(rows); agg["added"] += added; agg["duplicates"] += dup
@@ -260,14 +261,27 @@ def run(c: Client, root: Path, since: dt.date | None = None, progress: bool = Tr
         if on_step:
             on_step(label, steps["done"], steps["total"])
 
-    for src in SOURCES:
-        one(src, _state_key(src)); step(_state_key(src))
-    coins = _transfer_coins(c, store)
-    steps["total"] += len(coins)
-    for k in [k for k in state["sources"] if k.startswith("transfer_records:") and k.split(":", 1)[1] not in coins]:
-        state["sources"].pop(k)
-    for coin in coins:
-        one(dict(TRANSFERS, params={"coin": coin}, sub=coin), f"transfer_records:{coin}"); step(f"transfer_records:{coin}")
+    def batch(jobs: list) -> None:
+        """Fetch the sources concurrently (network-bound, read-only GETs; the client retries on rate limits),
+        then write them to the store one by one in a fixed order (the store and state are not thread-safe)."""
+        starts = [_start_for(src, state["sources"].get(sk, {}), since, now_ms) for src, sk in jobs]
+        with cf.ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+            futs = [ex.submit(fetch, c, src, s0, now_ms) for (src, _), s0 in zip(jobs, starts)]
+            for (src, sk), s0, f in zip(jobs, starts, futs):
+                rows, errs, calls = f.result()
+                commit(src, sk, s0, rows, errs, calls); step(sk)
+
+    with cf.ThreadPoolExecutor(max_workers=1) as snap_ex:
+        snap_fut = snap_ex.submit(snapshot_mod.build, c, t)    # holdings snapshot in parallel with the history
+        batch([(src, _state_key(src)) for src in SOURCES])
+        coins = _transfer_coins(c, store)
+        steps["total"] += len(coins)
+        for k in [k for k in state["sources"] if k.startswith("transfer_records:") and k.split(":", 1)[1] not in coins]:
+            state["sources"].pop(k)
+        batch([(dict(TRANSFERS, params={"coin": coin}, sub=coin), f"transfer_records:{coin}") for coin in coins])
+        if on_step:
+            on_step("snapshot", steps["done"], steps["total"])
+        doc, qty, h = snap_fut.result()
 
     for name in report["sources"]:
         store._load(name, next(s for s in SOURCES + [TRANSFERS] if s["name"] == name))
@@ -276,10 +290,6 @@ def run(c: Client, root: Path, since: dt.date | None = None, progress: bool = Tr
         report["sources"][name]["earliest"] = ms_to_oslo(e)[:10] if e else None
         report["sources"][name]["from"] = ms_to_oslo(report["sources"][name]["from"])[:10]
 
-    # holdings snapshot
-    if on_step:
-        on_step("snapshot", steps["done"], steps["total"])
-    doc, qty, h = snapshot_mod.build(c, t)
     if doc is not None:
         jpath, _ = snapshot_mod.write(root / t.strftime("%Y-%m") / "snapshots", doc, qty, t)
         report["snapshot"] = str(jpath.relative_to(root))

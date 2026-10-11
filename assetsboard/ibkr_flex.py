@@ -241,6 +241,10 @@ def catch_up_range(root: Path, today: dt.date | None = None, overlap_days: int =
     return start.strftime("%Y%m%d"), td.strftime("%Y%m%d")
 
 
+AUTO_MIN_HOURS = 6        # global 「抓取最新資料」
+CLICK_MIN_HOURS = 0.25    # explicit IBKR 「⟳ 更新」: at most once per 15 min
+
+
 def catch_up_due(root: Path, rng: tuple[str, str] | None, now: dt.datetime | None = None, min_hours: float = 6) -> bool:
     """Avoid hammering the Flex service: one attempt per target day every `min_hours`."""
     if not rng:
@@ -267,12 +271,13 @@ def note_catch_up(root: Path, rng: tuple[str, str], ok: bool, msg: str = "") -> 
 
 
 def catch_up(root: Path, token: str, query_id: str, out_dir: Path, today: dt.date | None = None, force: bool = False,
-             opener=None, sleep=time.sleep) -> dict:
-    """Download fd..td (last business day) and import. Returns {'status': 'up_to_date'|'skipped'|'ok', ...}."""
+             opener=None, sleep=time.sleep, min_hours: float = 6) -> dict:
+    """Download fd..td (last business day) and import. `min_hours` throttles repeat attempts for the same target
+    day (AUTO_MIN_HOURS for the global refresh, CLICK_MIN_HOURS when the user pressed IBKR's own 「⟳ 更新」). Returns {'status': 'up_to_date'|'skipped'|'ok', ...}."""
     rng = catch_up_range(root, today)
     if not rng:
         return {"status": "up_to_date", "coverage_to": coverage_to(root)}
-    if not force and not catch_up_due(root, rng):
+    if not force and not catch_up_due(root, rng, min_hours=min_hours):
         return {"status": "skipped", "range": rng, "coverage_to": coverage_to(root)}
     try:
         path = flex_fetch(token, query_id, out_dir, opener=opener, sleep=sleep, fd=rng[0], td=rng[1])

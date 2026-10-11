@@ -56,6 +56,10 @@ svg text{fill:var(--mut);font-size:11px}.legend span{margin-right:14px;font-size
 #rfpanel{display:none;position:fixed;right:18px;top:64px;max-height:calc(100vh - 80px);overflow:auto;width:min(560px,92vw);background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;box-shadow:0 12px 30px #0008;z-index:20;text-align:left}
 #rfpanel.on{display:block}#rfpanel table td{white-space:normal;vertical-align:top;padding:5px 6px}#rfpanel h3{font-size:13px;margin:0 0 6px}
 #rfpanel .expl{font-size:12px;color:var(--mut);margin:6px 0 8px;line-height:1.45}#rfpanel .bar{margin:6px 0}
+.srcbar{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;font-size:12px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 10px;margin:0 0 12px}
+.srcbar .grow{flex:1}.srcbar .msg{flex-basis:100%;color:var(--mut);line-height:1.4}
+.mini{font:inherit;font-size:11px;padding:2px 8px;border-radius:6px;border:1px solid var(--line);background:var(--panel2);color:var(--text);cursor:pointer;white-space:nowrap}
+.mini:hover{border-color:var(--acc)}.mini:disabled{opacity:.65;cursor:progress;color:var(--acc)}.manual{font-size:11px;color:var(--mut);white-space:nowrap}
 </style>
 </head>
 <body class="hide">
@@ -68,7 +72,7 @@ svg text{fill:var(--mut);font-size:11px}.legend span{margin-right:14px;font-size
   <span class="meta" id="meta"></span>
   <label class="toggle"><input type="checkbox" id="hide" checked> 隱藏金額</label>
   <div class="rf" id="rf">
-    <button class="btn pri" id="refresh" title="用唯讀 API 向各平台重新抓取餘額與紀錄，再重算盈虧（約 1–3 分鐘）。瀏覽器重新載入只會重讀已存的資料。">⟳ 抓取最新資料</button>
+    <button class="btn pri" id="refresh" title="用唯讀 API 同時向所有平台重新抓取餘額與紀錄，再重算盈虧（約 1 分鐘）。只想更新一個平台：按該分頁或總覽那一列的「⟳ 更新」。瀏覽器重新載入只會重讀已存的資料。">⟳ 抓取最新資料</button>
     <div class="rf-sub" id="rfsub" title="各來源的更新狀態（點開看詳情）"><span id="rflast">上次更新：—</span><span class="dots" id="rfdots"></span><span>▾</span></div>
     <div id="rfpanel"></div>
   </div>
@@ -78,6 +82,7 @@ svg text{fill:var(--mut);font-size:11px}.legend span{margin-right:14px;font-size
 <div id="err"></div>
 <section id="ov" class="on"></section>
 <section id="bg">
+  <div class="srchost" data-host="bitget"></div>
   <nav class="subnav" id="subnav">
     <button data-p="bgsum" class="on">概況與對帳</button><button data-p="hold">持倉與成本</button><button data-p="real">已實現盈虧</button><button data-p="flow">資金流</button><button data-p="dq">資料品質</button>
   </nav>
@@ -117,7 +122,7 @@ function subtab(id){document.querySelectorAll("#subnav button").forEach(x=>x.cla
   document.querySelectorAll("#bg>.sub").forEach(s=>s.classList.toggle("on",s.id===id));localStorage.setItem("bg_sub",id)}
 document.getElementById("nav").onclick=e=>{const b=e.target.closest("button");if(b)tab(b.dataset.s)};
 document.getElementById("subnav").onclick=e=>{const b=e.target.closest("button");if(b)subtab(b.dataset.p)};
-tab(localStorage.getItem("bg_tab")||"ov");subtab(localStorage.getItem("bg_sub")||"bgsum");
+tab((location.search.match(/[?&]tab=(\w+)/)||[])[1]||localStorage.getItem("bg_tab")||"ov");subtab(localStorage.getItem("bg_sub")||"bgsum");
 const hide=$("#hide");hide.checked=localStorage.getItem("bg_hide")!=="0";document.body.classList.toggle("hide",hide.checked);
 hide.onchange=()=>{document.body.classList.toggle("hide",hide.checked);localStorage.setItem("bg_hide",hide.checked?"1":"0")};
 
@@ -136,29 +141,63 @@ function ageH(t){if(!t)return null;const d=new Date(String(t).length===10?t+"T12
 function rfRender(){const R=RF||{},S=R.sources||{},run=!!R.running;
   const fails=RF_SRC.filter(([k])=>S[k]&&S[k].status==="failed").map(([,n])=>n);
   const warns=RF_SRC.filter(([k])=>S[k]&&(S[k].status==="warn"||S[k].status==="kept")).length;
-  $("#rflast").innerHTML=run?`<span class="st-running">抓取中 ${R.pct||0}%</span>`:
+  const busyN=(R.busy||[]).map(k=>(RF_SRC.find(x=>x[0]===k)||[k,k])[1]),anRun=!!(S.analysis&&S.analysis.running);
+  $("#rflast").innerHTML=run?`<span class="st-running">抓取中 ${R.pct||0}%</span>`:busyN.length?`<span class="st-running">更新中：${esc(busyN.join("、"))}</span>`:anRun?`<span class="st-running">重新計算中…</span>`:
     (R.last?`上次更新：${hm(R.last)}`+(fails.length?` <span class="st-failed">· ${fails.length} 項失敗</span>`:warns?` <span class="st-warn">· ${warns} 項注意</span>`:""):"上次更新：—（尚未在此 App 抓取）");
   $("#rfdots").innerHTML=RF_SRC.filter(([k])=>k!=="analysis").map(([k,n])=>{const st=(S[k]||{}).status||"pending";return `<i class="st-${st}" title="${esc(n)}：${esc(RF_WORD[st]||st)}"></i>`}).join("");
   const b=$("#refresh");b.disabled=run;b.textContent=run?"⟳ 抓取中…":"⟳ 抓取最新資料";
   const P=$("#rfpanel");P.classList.toggle("on",rfOpen||run);if(!(rfOpen||run))return;
   const sm=R.summary;let h=`<h3>${run?"正在抓取最新資料…":"抓取最新資料"}</h3>
-   <div class="expl">按鈕會用<b>唯讀 API</b>向下列平台重新抓取餘額、持倉與新紀錄，再重新計算盈虧（約 1–3 分鐘）。<br>瀏覽器的重新載入（⌘R）<b>不會</b>抓新資料，只會重讀已存的資料。Robinhood 沒有 API，要傳截圖手動更新。</div>`;
+   <div class="expl">「抓取最新資料」用<b>唯讀 API</b>同時向下列平台抓取餘額、持倉與新紀錄，再重新計算盈虧（約 1 分鐘）。<br>只想更新一個平台：按那一列（或該分頁頂端、總覽表格）的「⟳ 更新」，只抓那一個再快速重算，其他平台沿用上次結果。<br>瀏覽器的重新載入（⌘R）<b>不會</b>抓新資料，只會重讀已存的資料。Robinhood 沒有 API，要傳截圖給投資顧問更新。</div>`;
   if(run)h+=`<div class="small">${esc(R.stage||"")}</div><div class="bar"><i style="width:${R.pct||0}%;background:var(--acc)"></i></div>`;
   if(!run&&R.error)h+=`<div class="note st-failed small">整體失敗：${esc(R.error)}</div>`;
   if(!run&&sm&&sm.total_change!=null){const ch=sm.total_change;h+=`<div class="note small">本次結果（${hm(R.last)}）：總資產 ${amt(sm.total_after)} USDT（<span class="${sgn(ch)}">${ch>=0?"+":""}${amt(ch)}</span>）；盈虧 ${pct(sm.pnl_pct_after,2)}${sm.pnl_pct_change!=null&&Math.abs(sm.pnl_pct_change)>=0.005?`（${sm.pnl_pct_change>0?"+":""}${num(sm.pnl_pct_change,2)} 個百分點）`:""}`+
     (sm.venues&&sm.venues.length?`<br>變動：${sm.venues.slice(0,5).map(v=>`${esc(v.label)} <span class="${sgn(v.change)}">${v.change>=0?"+":""}${amt(v.change)}</span>`).join("、")}`:"<br>各平台金額沒有變動")+`</div>`}
-  h+=`<table><tr><th class="l">來源</th><th class="l">狀態</th><th>資料時間</th></tr>${RF_SRC.map(([k,n])=>{const x=S[k]||{status:"pending"},t=dataTime(k),a=ageH(t);
-    return `<tr><td class="l"><b>${esc(n)}</b></td><td class="l"><span class="st-${x.status}">${RF_ICON[x.status]||""} ${esc(RF_WORD[x.status]||x.status)}</span>${x.msg?`<div class="small mut">${esc(x.msg)}</div>`:""}</td><td class="${a!=null&&a>24&&k!=="robinhood"?"st-warn":"mut"} small">${esc(k==="ibkr_flex"&&t?"至 "+t:dt16(t))}${a!=null&&a>24&&k!=="robinhood"?`<br>${num(a/24,1)} 天前`:""}</td></tr>`}).join("")}</table>
+  h+=`<table><tr><th class="l">來源</th><th class="l">狀態</th><th>資料時間</th><th></th></tr>${RF_SRC.map(([k,n])=>{const x=S[k]||{status:"pending"},t=dataTime(k),a=ageH(t);
+    return `<tr><td class="l"><b>${esc(n)}</b></td><td class="l"><span class="st-${x.status}">${RF_ICON[x.status]||""} ${esc(RF_WORD[x.status]||x.status)}</span>${x.msg?`<div class="small mut">${esc(x.msg)}</div>`:""}</td><td class="${a!=null&&a>24&&k!=="robinhood"?"st-warn":"mut"} small">${esc(k==="ibkr_flex"&&t?"至 "+t:dt16(t))}${a!=null&&a>24&&k!=="robinhood"?`<br>${num(a/24,1)} 天前`:""}${x.at&&x.status!=="pending"&&k!=="robinhood"?`<br>抓取 ${hm(x.at)}${x.duration_s!=null?`・${num(x.duration_s,1)} 秒`:""}`:""}</td><td>${k==="analysis"||k==="ibkr_flex"?"":srcBtn(k)}</td></tr>`}).join("")}</table>
    <div class="small mut" style="margin-top:6px">「資料時間」是儀表板目前用的資料；IBKR 只有在 IB Gateway 開著時才會更新。</div>`;
   P.innerHTML=h}
 $("#rfsub").onclick=e=>{e.stopPropagation();rfOpen=!rfOpen;rfRender()};
 document.addEventListener("click",e=>{if(rfOpen&&!e.target.closest("#rf")){rfOpen=false;rfRender()}});
-async function rfPoll(){for(;;){await sleep(1000);let s;try{s=await (await fetch("/api/status")).json()}catch(e){continue}RF=s.refresh;rfRender();
-    if(!RF.running){if(RF.hint)showHint(RF.hint);await load(true);rfOpen=true;rfRender();break}}}
+// per-section 「⟳ 更新」: one source only (read-only), then a quick recompute of that venue; other venues keep their last result
+const SEC_SRC={mx:"mexc",kr:"kraken",cc:"cryptocom",wl:"wallets",ef:"etherfi_cash",ib:"ibkr",rh:"robinhood"};
+const srcName=k=>({ibkr:"IBKR"}[k]||(RF_SRC.find(x=>x[0]===k)||[k,k])[1]);
+const srcBusy=k=>{const R=RF||{};return (R.busy||[]).includes(k)||!!(((R.sources||{})[k]||{}).running)};
+let FEAT=[];
+function srcBtn(k,short){if(k!=="robinhood"&&!FEAT.includes("per_source"))return `<span class="manual" title="這個按鈕需要新版程式：結束並重新開啟 AssetsBoard.app 後可用">⟳ 重開 App 後可用</span>`;
+  if(k==="robinhood")return `<span class="manual" title="Robinhood 沒有 API：把 App 的 History／Portfolio 截圖傳給投資顧問更新">${short?"✎ 手動":"✎ 手動（傳截圖給投資顧問）"}</span>`;
+  const b=srcBusy(k);return `<button class="mini" data-src="${k}" ${b?"disabled":""} title="只抓 ${esc(srcName(k))} 的最新資料（唯讀），再快速重算${k==="ibkr"?"；需要 IB Gateway 開著才會更新持倉，Flex 出入金最快每 15 分鐘補抓一次":""}">${b?"⟳ 更新中…":"⟳ 更新"}</button>`}
+function srcBar(k){const S=(RF||{}).sources||{},x=S[k]||{},st=srcBusy(k)?"running":(x.status||"pending"),t=dataTime(k),a=ageH(t);
+  const rows=k==="ibkr"?["ibkr","ibkr_flex"]:[k];
+  const msgs=rows.map(r=>S[r]||{}).filter(y=>y.msg&&["failed","warn","kept","running"].includes(srcBusy(k)&&y.status==="pending"?"running":y.status)).map(y=>esc(y.msg));
+  if(k==="ibkr"&&(S.ibkr_flex||{}).status&&!msgs.length&&(S.ibkr_flex||{}).msg)msgs.push("Flex："+esc(S.ibkr_flex.msg));
+  return `<div class="srcbar"><b>${esc(srcName(k))}</b>${k==="robinhood"?"":`<span class="st-${st}">${RF_ICON[st]||""} ${esc(RF_WORD[st]||st)}</span>`}
+   <span class="${a!=null&&a>24&&k!=="robinhood"?"st-warn":"mut"}">資料時間 ${esc(dt16(t))}${a!=null&&a>24?`（${num(a/24,1)} 天前）`:""}</span>
+   ${k!=="robinhood"&&x.at&&x.status!=="pending"?`<span class="mut">上次抓取 ${hm(x.at)}${x.duration_s!=null?`・${num(x.duration_s,1)} 秒`:""}${x.status==="failed"&&x.last_ok?`；上次成功 ${dt16(x.last_ok)}`:""}</span>`:""}
+   ${k==="ibkr"&&D&&D.ibkr&&D.ibkr.flex_coverage_to?`<span class="mut">Flex 出入金至 ${esc(dataTime("ibkr_flex"))}</span>`:""}
+   <span class="grow"></span>${srcBtn(k)}${msgs.length?`<div class="msg">${msgs.join("<br>")}</div>`:""}</div>`}
+function mountBars(){for(const [sec,k] of Object.entries(SEC_SRC)){const el=$("#"+sec);if(el&&!el.querySelector(":scope > .srchost")){const d=document.createElement("div");d.className="srchost";d.dataset.host=k;el.prepend(d)}}}
+function srcRender(){document.querySelectorAll(".srchost").forEach(h=>{h.innerHTML=srcBar(h.dataset.host)});
+  document.querySelectorAll("button.mini[data-src]").forEach(b=>{const k=b.dataset.src,bz=srcBusy(k);b.disabled=bz;b.textContent=bz?"⟳ 更新中…":"⟳ 更新"})}
+function rfActive(R){R=R||{};return !!(R.running||(R.busy||[]).length||((R.sources||{}).analysis||{}).running)}
+let rfPolling=false;
+async function rfPoll(){if(rfPolling)return;rfPolling=true;let seen=(RF||{}).last,wasGlobal=false;
+  try{for(;;){await sleep(1000);let s;try{s=await (await fetch("/api/status")).json()}catch(e){continue}
+    wasGlobal=wasGlobal||!!s.refresh.running;RF=s.refresh;
+    if(RF.last!==seen){seen=RF.last;await load(true)}      // a recompute finished → re-read the data
+    rfRender();srcRender();
+    if(!rfActive(RF)){if(RF.hint)showHint(RF.hint);if(wasGlobal){rfOpen=true;rfRender()}break}}}
+  finally{rfPolling=false}}
+async function refreshSource(k){
+  try{const r=await fetch("/api/refresh",{method:"POST",headers:{"X-Bitguard-Token":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({source:k})});const j=await r.json();
+    if(!r.ok){showHint(j.error||("錯誤 "+r.status));return}
+    RF={...(RF||{})};RF.busy=[...new Set([...(RF.busy||[]),k])];srcRender();rfRender();rfPoll();
+  }catch(e){showHint("抓取失敗："+e.message)}}
+document.addEventListener("click",e=>{const b=e.target.closest("button.mini[data-src]");if(b&&!b.disabled){e.preventDefault();b.disabled=true;b.textContent="⟳ 更新中…";refreshSource(b.dataset.src)}});
 $("#refresh").onclick=async()=>{const b=$("#refresh");b.disabled=true;
   try{const r=await fetch("/api/refresh",{method:"POST",headers:{"X-Bitguard-Token":TOKEN}});const j=await r.json();
     if(!r.ok){showHint(j.error||("錯誤 "+r.status));b.disabled=false;return}
-    RF={...(RF||{}),running:true,pct:0,stage:"開始…",sources:{},summary:null};rfRender();await rfPoll();
+    RF={...(RF||{}),running:true,pct:0,stage:"開始…",summary:null};rfRender();rfPoll();
   }catch(e){showHint("抓取失敗："+e.message);b.disabled=false}};
 function showHint(t){const h=$("#hint");if(!t){h.style.display="none";return}
   h.innerHTML=esc(t).replace(/((?:\.venv\/bin\/python|python3) -m assetsboard [a-z-]+[^\n（。，]*)/g,'<code>$1</code>');h.style.display="block"}
@@ -205,8 +244,8 @@ function xcheck(o,A,diff){const X=o.crosscheck||[];if(!X.length)return "";
   return `<h2 style="margin-top:14px">逐帳戶對帳（快照 ${esc((o.snapshot_time||"").slice(0,16).replace("T"," "))}）</h2><table><tr><th class="l">項目</th><th>Bitget 估值</th><th>本工具</th><th>差</th><th class="l">來源</th></tr>${rows}${inv}${foot}</table>${note}`}
 function merged(){const E=D.exchanges,C=D.combined;if(!E)return "";
   const N={bitget:"Bitget",mexc:"MEXC",kraken:"Kraken",cryptocom:"Crypto.com",wallets:"鏈上錢包",etherfi_cash:"ether.fi Cash",ibkr:"IBKR",robinhood:"Robinhood"};
-  const rows=Object.entries(E).map(([k,v])=>v.present?`<tr><td class="l">${N[k]||esc(k)} <span class="tag">${v.group==="securities"?(v.split&&v.split.crypto>0.005?"證券＋加密":"證券"):v.group==="spending"?"開銷":"加密"}</span>${k==="robinhood"?` <span class="${v.value_method==="estimate"?"stale":"tag"}" title="Robinhood 沒有 API：紀錄來自截圖">${v.value_method==="estimate"?"估算":"截圖"}</span>`:""}</td><td>${amt(v.total)}${k==="ibkr"&&v.nav_base!=null?`<div class="small">${amt(v.nav_base)} ${esc(v.base_currency)}</div>`:""}${k==="mexc"&&v.earn_manual?`<div class="small">含理財 ${amt(v.earn_manual.value)} ${earnTag(v.earn_manual)}</div>`:""}${k==="wallets"&&v.n_wallets?`<div class="small">${v.n_wallets} 個錢包</div>`:""}</td><td>${pct(v.share).replace(/[+]/,"")}</td><td>${v.net_inflow==null?"—":amt(v.net_inflow)}</td><td>${v.pnl==null?"—":amt(v.pnl)}${k==="robinhood"&&v.realized!=null?`<div class="small mut">已實現 ${amt(v.realized)}／未實現 ${amt(v.unrealized)}／獎勵 ${amt(v.rewards_pnl)}</div>`:""}</td><td>${pct(v.pnl_pct)}${k==="mexc"&&v.baseline?` <span class="tag">${esc(v.baseline.label)}</span>`:k==="mexc"&&!v.history_complete?' <span class="stale" title="MEXC API 只能查 90 天充提；更早的入金看不到">⚠ 歷史可能不完整</span>':k==="kraken"&&!v.history_complete?' <span class="stale" title="Kraken 帳本尚未完整讀取">⚠ 帳本未完整</span>':k==="ibkr"&&v.baseline?` <span class="tag">${esc(v.baseline.label)}</span>`+(v.flex_stale?` <span class="stale" title="出入金（Flex）只到 ${esc(v.flex_coverage_to||"")}，比快照早 ${v.flex_lag_days} 天：之後的入金未計入，盈虧可能偏高">⚠ 出入金落後 ${v.flex_lag_days} 天</span>`:""):k==="cryptocom"&&(v.full_history||v.baseline)?` <span class="tag" title="${v.full_history?"盈虧 % 以開戶以來總入金計算":""}">${esc((v.full_history||v.baseline).label)}</span>`+(v.warning?' <span class="stale" title="'+esc(v.warning)+'">⚠ 金鑰</span>':""):k==="wallets"&&v.baseline?` <span class="tag">${esc(v.baseline.label)}</span>`:""}</td><td class="mut">${esc((v.snapshot_time||"").slice(0,16).replace("T"," "))}</td></tr>`
-    :`<tr><td class="l">${N[k]||esc(k)}</td><td colspan="6" class="l mut">${esc(v.reason||"未設定")}</td></tr>`).join("");
+  const rows=Object.entries(E).map(([k,v])=>v.present?`<tr><td class="l">${N[k]||esc(k)} <span class="tag">${v.group==="securities"?(v.split&&v.split.crypto>0.005?"證券＋加密":"證券"):v.group==="spending"?"開銷":"加密"}</span>${k==="robinhood"?` <span class="${v.value_method==="estimate"?"stale":"tag"}" title="Robinhood 沒有 API：紀錄來自截圖">${v.value_method==="estimate"?"估算":"截圖"}</span>`:""}</td><td>${amt(v.total)}${k==="ibkr"&&v.nav_base!=null?`<div class="small">${amt(v.nav_base)} ${esc(v.base_currency)}</div>`:""}${k==="mexc"&&v.earn_manual?`<div class="small">含理財 ${amt(v.earn_manual.value)} ${earnTag(v.earn_manual)}</div>`:""}${k==="wallets"&&v.n_wallets?`<div class="small">${v.n_wallets} 個錢包</div>`:""}</td><td>${pct(v.share).replace(/[+]/,"")}</td><td>${v.net_inflow==null?"—":amt(v.net_inflow)}</td><td>${v.pnl==null?"—":amt(v.pnl)}${k==="robinhood"&&v.realized!=null?`<div class="small mut">已實現 ${amt(v.realized)}／未實現 ${amt(v.unrealized)}／獎勵 ${amt(v.rewards_pnl)}</div>`:""}</td><td>${pct(v.pnl_pct)}${k==="mexc"&&v.baseline?` <span class="tag">${esc(v.baseline.label)}</span>`:k==="mexc"&&!v.history_complete?' <span class="stale" title="MEXC API 只能查 90 天充提；更早的入金看不到">⚠ 歷史可能不完整</span>':k==="kraken"&&!v.history_complete?' <span class="stale" title="Kraken 帳本尚未完整讀取">⚠ 帳本未完整</span>':k==="ibkr"&&v.baseline?` <span class="tag">${esc(v.baseline.label)}</span>`+(v.flex_stale?` <span class="stale" title="出入金（Flex）只到 ${esc(v.flex_coverage_to||"")}，比快照早 ${v.flex_lag_days} 天：之後的入金未計入，盈虧可能偏高">⚠ 出入金落後 ${v.flex_lag_days} 天</span>`:""):k==="cryptocom"&&(v.full_history||v.baseline)?` <span class="tag" title="${v.full_history?"盈虧 % 以開戶以來總入金計算":""}">${esc((v.full_history||v.baseline).label)}</span>`+(v.warning?' <span class="stale" title="'+esc(v.warning)+'">⚠ 金鑰</span>':""):k==="wallets"&&v.baseline?` <span class="tag">${esc(v.baseline.label)}</span>`:""}</td><td class="mut" style="white-space:nowrap">${esc((v.snapshot_time||"").slice(0,16).replace("T"," "))} ${srcBtn(k,true)}</td></tr>`
+    :`<tr><td class="l">${N[k]||esc(k)}</td><td colspan="5" class="l mut">${esc(v.reason||"未設定")}</td><td>${srcBtn(k,true)}</td></tr>`).join("");
   const bar=Object.entries(E).filter(([k,v])=>v.present&&v.share).map(([k,v],i)=>`<i title="${N[k]}" style="width:${v.share}%;background:${({bitget:"var(--acc)",mexc:"#26c6da",kraken:"#b26bff",cryptocom:"#1199fa",wallets:"#66bb6a",ibkr:"#e0a526",robinhood:"#ccff00"})[k]||"#888"};display:inline-block;height:100%"></i>`).join("");
   return `<div class="panel"><h2>跨交易所總覽</h2>
    <div class="cards" style="margin-bottom:10px">${card("合計總資產",amt(C.total),C.exchanges.map(k=>N[k]).join("＋")+((C.manual_parts||[]).length?"<br>含手動填入："+C.manual_parts.map(m=>esc(m.what)+" "+amt(m.value)+"（"+esc((m.set_at||"").slice(0,10))+"）").join("、"):""))}${card("合計淨入金",amt(C.net_inflow),(C.method?"各交易所淨入金加總；交易所之間的互轉視為內部"+(C.cross_matched&&C.cross_matched.adjustment?"（手續費調整 "+amt(C.cross_matched.adjustment)+"）":""):"各交易所可計算部分；互轉正負抵銷"))}${hasSec(C.groups)?card("合計盈虧",amt(C.pnl),"加密 "+pct(C.groups.crypto.pnl_pct)+"／證券 "+pct(C.groups.securities.pnl_pct)+"<br><span class='small mut'>兩類資產的盈虧率分開看（混合成一個 % 會失真）</span>"+(C.pnl_overstated_up_to?`<br><span class="stale">⚠ 最多高估 ${amt(C.pnl_overstated_up_to)}（MEXC 封存前的資金看不到）</span>`:"")):card("合計盈虧",pct(C.pnl_pct),amt(C.pnl)+(C.pnl_overstated_up_to?`<br><span class="stale">⚠ 最多高估 ${amt(C.pnl_overstated_up_to)}（MEXC 封存前的資金看不到）</span>`:""))}</div>
@@ -623,15 +662,15 @@ function renderDQ(){
 
 async function load(fromRefresh){
   let resume=false;
-  try{const st=await (await fetch("/api/status")).json();RF=st.refresh;
+  try{const st=await (await fetch("/api/status")).json();RF=st.refresh;FEAT=st.features||[];
     if(!st.credentials)showHint(st.no_credentials_hint);else if(!fromRefresh)showHint("");
-    resume=!!(RF&&RF.running&&!fromRefresh)}catch(e){}
+    resume=!!(rfActive(RF)&&!fromRefresh)}catch(e){}
   try{const r=await fetch("/api/analysis");D=await r.json();if(!r.ok)throw new Error(D.error||r.status);
     $("#err").textContent="";
     $("#meta").textContent=`分析 ${D.generated_oslo.slice(0,16).replace("T"," ")}　快照 ${(D.overview.snapshot_time||"").slice(0,16).replace("T"," ")}（Oslo）`;
     applyEarn();renderOverview();renderBitget();renderHoldings();renderRealized();renderFlows();renderMexc();renderKraken();renderCdc();renderWallets();renderEtherfi();renderIbkr();try{renderRobinhood()}catch(e){$("#rh").innerHTML='<div class="panel mut">Robinhood 顯示失敗：'+esc(e.message)+'</div>'}renderDQ();
   }catch(e){$("#err").textContent="無法載入分析："+e.message}
-  rfRender();if(resume)rfPoll();
+  mountBars();srcRender();rfRender();if(resume)rfPoll();
 }
 load();
 </script>

@@ -15,6 +15,7 @@ import secrets
 import socket
 import socketserver
 import threading
+import time
 import urllib.request
 import traceback
 import webbrowser
@@ -59,8 +60,17 @@ SOURCES = (("bitget", "Bitget"), ("mexc", "MEXC"), ("kraken", "Kraken"), ("crypt
 LAST_RESULT = "refresh_last.json"
 
 
-def _blank_sources() -> dict:
-    return {k: {"label": n, "status": "pending", "msg": "", "at": None} for k, n in SOURCES}
+# per-source buttons (「⟳ 更新」): key → the status rows it updates. IBKR's button = Gateway snapshot + Flex catch-up.
+FETCHERS = ("bitget", "mexc", "kraken", "cryptocom", "wallets", "etherfi_cash", "ibkr")
+ROWS_OF = {"ibkr": ("ibkr", "ibkr_flex")}
+VENUE_OF = {"ibkr_flex": "ibkr"}          # status row → analysis venue
+
+
+def _blank_sources(prev: dict | None = None) -> dict:
+    """Fresh status rows; keeps each row's last successful update time (shown next to its button)."""
+    prev = prev or {}
+    return {k: {"label": n, "status": "pending", "msg": "", "at": None, "last_ok": (prev.get(k) or {}).get("last_ok"),
+                "duration_s": None, "running": False} for k, n in SOURCES}
 
 
 def summarize(doc: dict | None) -> dict | None:
@@ -94,16 +104,40 @@ class State:
     def __init__(self, project: Path):
         self.project = project
         self.token = secrets.token_urlsafe(24)
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()          # guards refresh dict, busy set and the analysis queue
+        self.busy: set[str] = set()           # fetchers running now (the same source never runs twice at once)
+        self.pending: set[str] | None = None  # analysis queued: venues to recompute ({"*"} = everything)
+        self.analysis_active = False
         self.refresh = {"running": False, "last": None, "error": None, "log": [], "stage": "", "pct": 0,
-                        "sources": _blank_sources(), "summary": None, "hint": None}
+                        "sources": _blank_sources(), "summary": None, "hint": None, "busy": [], "scope": None,
+                        "timings": {}}
         lp = project / "snapshots" / LAST_RESULT          # last result survives an app restart
         try:
             if lp.exists():
                 last = json.loads(lp.read_text(encoding="utf-8"))
-                self.refresh.update({k: last.get(k) for k in ("last", "error", "log", "sources", "summary", "hint")})
-                self.refresh["stage"] = ""
+                self.refresh.update({k: last.get(k) for k in ("last", "error", "log", "summary", "hint", "scope")})
+                self.refresh["timings"] = last.get("timings") or {}
+                old = last.get("sources") or {}
+                srcs = _blank_sources(old)
+                for k, v in srcs.items():
+                    o = old.get(k) or {}
+                    v.update({x: o.get(x) for x in ("status", "msg", "at", "duration_s") if o.get(x) is not None})
+                    if v["status"] in ("pending", "running"):
+                        v["status"] = "skipped"
+                    if not v.get("last_ok") and o.get("status") in ("ok", "warn", "kept", "manual"):
+                        v["last_ok"] = o.get("at")      # files written before per-source refresh existed
+                self.refresh["sources"] = srcs
         except (ValueError, OSError):
+            pass
+
+    def save(self) -> None:
+        R = self.refresh
+        try:
+            (self.project / "snapshots").mkdir(exist_ok=True)
+            (self.project / "snapshots" / LAST_RESULT).write_text(json.dumps(
+                {k: R.get(k) for k in ("last", "error", "log", "sources", "summary", "hint", "scope", "timings")},
+                ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError:
             pass
 
 
@@ -115,190 +149,323 @@ def _read_analysis(project: Path) -> dict | None:
         return None
 
 
-def _refresh(st: State) -> None:
-    """Fetch every configured source read-only (each one independently: one failing never blocks the others), then analyze.
-    Per-source status goes to st.refresh['sources'] for the UI; the result is also saved to snapshots/refresh_last.json."""
-    from . import analysis as analysis_mod
+def _marker(st: State):
+    """mark(key, status, msg): updates one status row (thread-safe); 'ok'/'warn'/'kept'/'manual' stamp last_ok."""
     R = st.refresh
-    S = R["sources"] = _blank_sources()
-    order = [k for k, _ in SOURCES]
-    log = R["log"]
 
     def mark(key: str, status: str, msg: str = "") -> None:
-        S[key].update(status=status, msg=msg[:220], at=now_oslo().isoformat(timespec="seconds"))
-        if status != "running":
-            log.append(f"{S[key]['label']}：{msg}" if msg else S[key]["label"])
-        if status == "running":
-            R.update(stage=f"{S[key]['label']}…" + (f"（{msg}）" if msg else ""),
-                     pct=int(100 * order.index(key) / len(order)))
+        with st.lock:
+            S = R["sources"][key]
+            now = now_oslo().isoformat(timespec="seconds")
+            if status == "running" and "_t0" not in S:
+                S["_t0"] = time.time()
+            S.update(status=status, msg=msg[:220], at=now, running=status == "running")
+            if status != "running":
+                if "_t0" in S:
+                    S["duration_s"] = round(time.time() - S.pop("_t0"), 1)
+                if status in ("ok", "warn"):
+                    S["last_ok"] = now
+                R["log"] = (R.get("log") or [])[-40:] + [f"{S['label']}：{msg}" if msg else S["label"]]
+    return mark
 
-    def sub(key: str):   # sub-step progress callback for long archives
-        def cb(label: str, done: int, total: int) -> None:
-            base = order.index(key) / len(order)
-            R.update(stage=f"{S[key]['label']}：{str(label).split(':')[-1]}（{done}/{total}）",
-                     pct=int(100 * (base + (done / max(total, 1)) / len(order))))
-        return cb
 
-    before = summarize(_read_analysis(st.project))
+def _sub(st: State, key: str):   # sub-step progress for long archives → shown in that source's row
+    def cb(label: str, done: int, total: int) -> None:
+        with st.lock:
+            st.refresh["sources"][key]["msg"] = f"{str(label).split(':')[-1]}（{done}/{total}）"
+    return cb
+
+
+# ---------------------------------------------------------------- one function per source (read-only fetch)
+def _fetch_bitget(st: State, mark, explicit: bool) -> None:
+    if not creds_ok():
+        mark("bitget", "skipped", "沒有 API 憑證，沿用上次資料"); st.refresh["hint"] = no_creds_msg(); return
     try:
-        # ---- Bitget
-        mark("bitget", "running")
-        if not creds_ok():
-            mark("bitget", "skipped", "沒有 API 憑證，沿用上次資料"); R["hint"] = no_creds_msg()
+        from . import archive as archive_mod
+        from .client import Client
+        rep = archive_mod.run(Client(), st.project / "archive", progress=False, on_step=_sub(st, "bitget"))
+        added = sum(v["added"] for v in rep["sources"].values())
+        if "snapshot" in rep["errors"]:
+            mark("bitget", "failed", "持倉快照讀取失敗：" + json.dumps(rep["errors"]["snapshot"], ensure_ascii=False)[:150])
+        elif rep["errors"]:
+            mark("bitget", "warn", f"已更新；新增 {added} 筆紀錄；{len(rep['errors'])} 個紀錄來源讀取失敗")
         else:
-            try:
-                from . import archive as archive_mod
-                from .client import Client
-                rep = archive_mod.run(Client(), st.project / "archive", progress=False, on_step=sub("bitget"))
-                added = sum(v["added"] for v in rep["sources"].values())
-                if "snapshot" in rep["errors"]:
-                    mark("bitget", "failed", "持倉快照讀取失敗：" + json.dumps(rep["errors"]["snapshot"], ensure_ascii=False)[:150])
-                elif rep["errors"]:
-                    mark("bitget", "warn", f"已更新；新增 {added} 筆紀錄；{len(rep['errors'])} 個紀錄來源讀取失敗")
-                else:
-                    mark("bitget", "ok", f"已更新；新增 {added} 筆紀錄")
-            except SystemExit as e:
-                mark("bitget", "failed", str(e)[:200]); R["hint"] = no_creds_msg()
-            except Exception as e:  # noqa: BLE001
-                mark("bitget", "failed", f"{type(e).__name__}: {e}")
+            mark("bitget", "ok", f"已更新；新增 {added} 筆紀錄")
+    except SystemExit as e:
+        mark("bitget", "failed", str(e)[:200]); st.refresh["hint"] = no_creds_msg()
 
-        # ---- MEXC / Kraken (same shape)
-        for key, modname, cls in (("mexc", "mexc", "MexcClient"), ("kraken", "kraken", "KrakenClient")):
-            mod = __import__(f"assetsboard.{modname}", fromlist=["available"])
-            mark(key, "running")
-            if not mod.available():
-                mark(key, "skipped", "未設定 API 憑證"); continue
-            try:
-                r = mod.archive_run(getattr(mod, cls)(), st.project / "archive" / modname, progress=False, on_step=sub(key))
-                add = sum(v["added"] for v in r["sources"].values())
-                if "snapshot" in (r.get("errors") or {}):
-                    why = "; ".join(str(x.get("msg", "")) for x in r["errors"]["snapshot"] if isinstance(x, dict))[:120]
-                    mark(key, "failed", "持倉讀取失敗，沿用上次資料" + (f"：{why}" if why else ""))
-                elif r.get("errors"):
-                    mark(key, "warn", f"已更新；新增 {add} 筆；{len(r['errors'])} 個紀錄來源讀取失敗（{', '.join(list(r['errors'])[:3])}）")
-                else:
-                    mark(key, "ok", f"已更新；新增 {add} 筆")
-            except SystemExit as e:
-                mark(key, "failed", str(e)[:200])
-            except Exception as e:  # noqa: BLE001
-                mark(key, "failed", f"{type(e).__name__}: {e}")
 
-        # ---- Crypto.com
-        from . import cryptocom as cdc_mod
-        mark("cryptocom", "running")
-        if not cdc_mod.available():
-            mark("cryptocom", "skipped", "未設定 API 憑證")
+def _fetch_simple(key: str, modname: str, cls: str):
+    def run(st: State, mark, explicit: bool) -> None:
+        mod = __import__(f"assetsboard.{modname}", fromlist=["available"])
+        if not mod.available():
+            mark(key, "skipped", "未設定 API 憑證"); return
+        try:
+            kw = {"on_step": _sub(st, key)} if key != "cryptocom" else {}
+            r = mod.archive_run(getattr(mod, cls)(), st.project / "archive" / modname, progress=False, **kw)
+        except SystemExit as e:
+            mark(key, "failed", str(e)[:200]); return
+        add = sum(v["added"] for v in r["sources"].values())
+        errs = r.get("errors") or {}
+        if "snapshot" in errs:
+            why = "; ".join(str(x.get("msg", "")) for x in errs["snapshot"] if isinstance(x, dict))[:140]
+            mark(key, "failed", "持倉讀取失敗，畫面沿用上次資料" + (f"：{why}" if why else "")
+                 + ("（API 金鑰無效／過期 → 換一組唯讀金鑰）" if any(w in why.lower() for w in ("api-key", "apikey", "api key", "signature", "invalid")) else ""))
+        elif errs or r.get("warning"):
+            mark(key, "warn", f"已更新；新增 {add} 筆" + (f"；{len(errs)} 個紀錄來源讀取失敗（{', '.join(list(errs)[:3])}）" if errs else "")
+                 + (f"；⚠ {r['warning']}" if r.get("warning") else ""))
         else:
-            try:
-                r = cdc_mod.archive_run(cdc_mod.CdcClient(), st.project / "archive" / "cryptocom", progress=False)
-                add = sum(v["added"] for v in r["sources"].values())
-                msg = f"已更新；新增 {add} 筆" + (f"；讀取失敗：{', '.join(r['errors'])}" if r["errors"] else "") + \
-                    (f"；⚠ {r['warning']}" if r.get("warning") else "")
-                mark("cryptocom", "warn" if r["errors"] or r.get("warning") else "ok", msg)
-            except SystemExit as e:
-                mark("cryptocom", "failed", str(e)[:200])
-            except Exception as e:  # noqa: BLE001
-                mark("cryptocom", "failed", f"{type(e).__name__}: {e}")
+            mark(key, "ok", f"已更新；新增 {add} 筆")
+    return run
 
-        # ---- on-chain wallets
-        mark("wallets", "running")
-        try:
-            from . import wallets as wallets_mod
-            r = wallets_mod.archive_run(st.project / "archive" / "wallets", progress=False)
-            tot = f"合計 {r.get('total_usdt'):,.2f} USDT" if r.get("total_usdt") is not None else "未設定錢包"
-            if r.get("errors"):
-                mark("wallets", "warn", f"{tot}；讀取失敗：{', '.join(map(str, r['errors']))}")
-            else:
-                mark("wallets", "ok" if r.get("total_usdt") is not None else "skipped", tot)
-        except Exception as e:  # noqa: BLE001
-            mark("wallets", "failed", f"{type(e).__name__}: {e}")
 
-        # ---- ether.fi Cash
-        mark("etherfi_cash", "running")
-        try:
-            from . import etherfi_cash as efc_mod
-            r = efc_mod.archive_run(st.project / "archive" / "etherfi_cash", progress=False)
-            if r.get("total_usdt") is not None:
-                mark("etherfi_cash", "warn" if r.get("errors") else "ok", f"已更新；餘額 {r['total_usdt']:,.2f}")
-            elif r.get("errors"):
-                mark("etherfi_cash", "failed", str(r["errors"])[:160])
-            else:
-                mark("etherfi_cash", "skipped", "未設定")
-        except Exception as e:  # noqa: BLE001
-            mark("etherfi_cash", "failed", f"{type(e).__name__}: {e}")
+def wallets_message(r: dict) -> tuple[str, str]:
+    """(status, message) for the 鏈上錢包 row; names the wallet and the reason instead of a bare 'wallet'."""
+    tot = f"合計 {r['total_usdt']:,.2f} USDT" if r.get("total_usdt") is not None else None
+    bad = [w for w in r.get("wallets") or [] if w.get("error")]
+    if not bad:
+        return ("ok", tot) if tot else ("skipped", "未設定錢包")
+    parts = []
+    for w in bad:
+        p = f"{w['id']} 讀取失敗（{str(w['error'])[:80]}）"
+        p += f"，沿用 {str(w['carried_from'])[5:16].replace('T', ' ')} 的數量" if w.get("carried_from") else "，未計入"
+        parts.append(p)
+    errs = r.get("errors") if isinstance(r.get("errors"), dict) else {}
+    if errs.get("snapshot"):
+        return "failed", "讀取失敗：" + str(errs["snapshot"][0].get("msg"))[:160]
+    return ("warn" if tot else "failed"), "；".join(([tot] if tot else []) + parts)
 
-        # ---- IBKR live (only when the user has IB Gateway open)
-        from . import ibkr as ibkr_mod
-        mark("ibkr", "running", "讀取本機 IB Gateway（唯讀）")
+
+def _fetch_wallets(st: State, mark, explicit: bool) -> None:
+    from . import wallets as wallets_mod
+    r = wallets_mod.archive_run(st.project / "archive" / "wallets", progress=False)
+    mark("wallets", *wallets_message(r))
+
+
+def _fetch_etherfi(st: State, mark, explicit: bool) -> None:
+    from . import etherfi_cash as efc_mod
+    r = efc_mod.archive_run(st.project / "archive" / "etherfi_cash", progress=False)
+    if r.get("total_usdt") is not None:
+        mark("etherfi_cash", "warn" if r.get("errors") else "ok", f"已更新；餘額 {r['total_usdt']:,.2f}")
+    elif r.get("errors"):
+        mark("etherfi_cash", "failed", str(r["errors"])[:160])
+    else:
+        mark("etherfi_cash", "skipped", "未設定")
+
+
+def _fetch_ibkr(st: State, mark, explicit: bool) -> None:
+    """Gateway snapshot when port 4001 answers (never opens Gateway), then the Flex catch-up (HTTP, no Gateway).
+    Flex: at most every 6 h from the global refresh; an explicit IBKR click may retry after 15 min."""
+    from . import ibkr as ibkr_mod
+    mark("ibkr", "running", "讀取本機 IB Gateway（唯讀）")
+    try:
         if ibkr_mod.available():
             try:
                 irep = ibkr_mod.archive_run(st.project / "archive" / "ibkr", progress=False)
                 mark("ibkr", "ok" if irep.get("snapshot") else "failed", ibkr_mod.refresh_message(irep).removeprefix("IBKR "))
             except ibkr_mod.IbkrUnavailable as e:
                 mark("ibkr", "failed", "未更新：" + str(e)[:160])
-            except Exception as e:  # noqa: BLE001
-                mark("ibkr", "failed", f"{type(e).__name__}: {e}")
         else:
-            mark("ibkr", "kept", "IB Gateway 未開啟 → 沿用上次快照（要更新：開啟並登入 IB Gateway，等 1 分鐘再按）")
-
-        # ---- IBKR Flex (HTTP, no Gateway): deposits/trades up to the last business day; at most every 6 h
-        mark("ibkr_flex", "running")
-        try:
-            from . import ibkr_flex
-            from .client import credential_sources as cs, load_secret
-            iroot = st.project / "archive" / "ibkr"
-            if not (ibkr_flex.present(iroot) and all(cs(ibkr_flex.FLEX_NAMES).values())):
-                mark("ibkr_flex", "skipped", "未設定 Flex Web Service")
+            mark("ibkr", "kept", "IB Gateway 未開啟（127.0.0.1:4001 沒有回應）→ 持倉沿用上次快照；"
+                                 "要更新：開啟並登入 IB Gateway，等 1 分鐘再按 IBKR 的「⟳ 更新」")
+    except Exception as e:  # noqa: BLE001
+        mark("ibkr", "failed", f"{type(e).__name__}: {e}")
+    mark("ibkr_flex", "running")
+    try:
+        from . import ibkr_flex
+        from .client import credential_sources as cs, load_secret
+        iroot = st.project / "archive" / "ibkr"
+        hrs = ibkr_flex.CLICK_MIN_HOURS if explicit else ibkr_flex.AUTO_MIN_HOURS
+        if not (ibkr_flex.present(iroot) and all(cs(ibkr_flex.FLEX_NAMES).values())):
+            mark("ibkr_flex", "skipped", "未設定 Flex Web Service")
+            return
+        rng = ibkr_flex.catch_up_range(iroot)
+        if not rng:
+            mark("ibkr_flex", "ok", f"已是最新（涵蓋至 {ibkr_flex.coverage_to(iroot)}）")
+        elif ibkr_flex.catch_up_due(iroot, rng, min_hours=hrs):
+            mark("ibkr_flex", "running", f"補抓 {rng[0]}–{rng[1]}")
+            frep = ibkr_flex.catch_up(iroot, load_secret("IBKR_FLEX_TOKEN"), load_secret("IBKR_FLEX_QUERY_ID"),
+                                      st.project / "imports" / "ibkr", min_hours=hrs)
+            if frep.get("status") == "ok":
+                mark("ibkr_flex", "ok", f"已補到 {frep.get('coverage_to')}")
             else:
-                rng = ibkr_flex.catch_up_range(iroot)
-                if not rng:
-                    mark("ibkr_flex", "ok", f"已是最新（涵蓋至 {ibkr_flex.coverage_to(iroot)}）")
-                elif ibkr_flex.catch_up_due(iroot, rng):
-                    mark("ibkr_flex", "running", f"補抓 {rng[0]}–{rng[1]}")
-                    frep = ibkr_flex.catch_up(iroot, load_secret("IBKR_FLEX_TOKEN"), load_secret("IBKR_FLEX_QUERY_ID"),
-                                              st.project / "imports" / "ibkr")
-                    mark("ibkr_flex", "ok", f"已補到 {frep.get('coverage_to')}")
-                else:
-                    mark("ibkr_flex", "kept", f"涵蓋至 {ibkr_flex.coverage_to(iroot)}；6 小時內已試過，稍後再補")
-        except Exception as e:  # noqa: BLE001
-            mark("ibkr_flex", "failed", f"{type(e).__name__}: {e}")
+                mark("ibkr_flex", "kept", f"涵蓋至 {ibkr_flex.coverage_to(iroot)}（{frep.get('status')}）")
+        else:
+            wait = "15 分鐘" if explicit else "6 小時（按 IBKR 的「⟳ 更新」可提早到 15 分鐘）"
+            mark("ibkr_flex", "kept", f"涵蓋至 {ibkr_flex.coverage_to(iroot)}；{wait}內已試過，稍後再補")
+    except Exception as e:  # noqa: BLE001
+        mark("ibkr_flex", "failed", f"{type(e).__name__}: {e}")
 
-        # ---- Robinhood: no API
-        try:
-            from . import robinhood as rh_mod
-            rows = rh_mod.load_ledger(st.project / "archive" / "robinhood")
-            pf = rh_mod.load_portfolio(st.project / "archive" / "robinhood")
-            last = max((r["date"] for r in rows), default=None)
-            mark("robinhood", "manual", ("無 API，靠截圖手動更新" + (f"；最新紀錄 {last}" if last else "；尚無紀錄")
-                                         + (f"；Portfolio 截圖 {str(pf.get('at'))[:16].replace('T', ' ')}" if pf else "")))
-        except Exception as e:  # noqa: BLE001
-            mark("robinhood", "manual", f"無 API，靠截圖手動更新（{type(e).__name__}）")
 
-        # ---- analysis
-        mark("analysis", "running", "成本、盈虧、資金流")
-        analysis_mod.run(st.project)
-        mark("analysis", "ok", "已重新計算")
-        R["summary"] = diff_summary(before, summarize(_read_analysis(st.project)))
-        R.update(stage="完成", pct=100, error=None)
-    except SystemExit as e:
-        R["error"] = str(e)[:300]
+def _mark_robinhood(st: State, mark) -> None:
+    pf = None
+    try:
+        from . import robinhood as rh_mod
+        rows = rh_mod.load_ledger(st.project / "archive" / "robinhood")
+        pf = rh_mod.load_portfolio(st.project / "archive" / "robinhood")
+        last = max((r["date"] for r in rows), default=None)
+        msg = ("手動：沒有 API，傳截圖給投資顧問更新" + (f"；最新紀錄 {last}" if last else "；尚無紀錄")
+               + (f"；Portfolio 截圖 {str(pf.get('at'))[:16].replace('T', ' ')}" if pf else ""))
+    except Exception as e:  # noqa: BLE001
+        msg = f"手動：沒有 API，傳截圖給投資顧問更新（{type(e).__name__}）"
+    mark("robinhood", "manual", msg)
+    with st.lock:
+        st.refresh["sources"]["robinhood"]["last_ok"] = str(pf.get("at"))[:19] if pf and pf.get("at") else None
+
+
+FETCH = {"bitget": _fetch_bitget, "mexc": _fetch_simple("mexc", "mexc", "MexcClient"),
+         "kraken": _fetch_simple("kraken", "kraken", "KrakenClient"),
+         "cryptocom": _fetch_simple("cryptocom", "cryptocom", "CdcClient"),
+         "wallets": _fetch_wallets, "etherfi_cash": _fetch_etherfi, "ibkr": _fetch_ibkr}
+
+
+def _run_fetch(st: State, key: str, explicit: bool) -> None:
+    """One source, read-only; never raises (a failure only marks that source). Releases the source's busy flag."""
+    mark = _marker(st)
+    t0 = time.time()
+    try:
+        mark(key, "running", "讀取中…")
+        FETCH[key](st, mark, explicit)
     except BaseException as e:  # noqa: BLE001 - report to UI, keep server alive
-        R["error"] = f"{type(e).__name__}: {e}"[:300]
+        mark(key, "failed", f"{type(e).__name__}: {e}")
         traceback.print_exc()
     finally:
-        for v in S.values():
-            if v["status"] in ("pending", "running"):
-                v.update(status="failed" if R["error"] else "skipped", msg=v["msg"] or ("未執行" if R["error"] else ""))
-        R["running"] = False
-        R["last"] = now_oslo().isoformat(timespec="seconds")
-        if R["error"]:
-            R["stage"] = "失敗"
+        with st.lock:
+            for row in ROWS_OF.get(key, (key,)):
+                S = st.refresh["sources"][row]
+                if S["status"] in ("pending", "running"):
+                    S.update(status="failed", msg=S["msg"] or "未完成", running=False)
+            st.busy.discard(key)
+            st.refresh["busy"] = sorted(st.busy)
+            st.refresh.setdefault("timings", {})[key] = round(time.time() - t0, 1)
+
+
+# ---------------------------------------------------------------- analysis queue (serialized, coalesced)
+def request_analysis(st: State, venues) -> None:
+    """Queue a recompute of `venues` ({'*'} = all). One analysis at a time; requests that arrive meanwhile are merged."""
+    with st.lock:
+        st.pending = set(venues) | (st.pending or set())
+        st.refresh["sources"]["analysis"].update(status="pending" if st.analysis_active else "running", running=True)
+        if st.analysis_active:
+            return
+        st.analysis_active = True
+    threading.Thread(target=_analysis_worker, args=(st,), daemon=True).start()
+
+
+def _analysis_worker(st: State) -> None:
+    from . import analysis as analysis_mod
+    mark = _marker(st)
+    while True:
+        with st.lock:
+            todo, st.pending = st.pending, None
+            if not todo:
+                st.analysis_active = False
+                st.refresh["sources"]["analysis"]["running"] = False
+                break
+        only = None if "*" in todo or set(analysis_mod.VENUES) <= todo else set(todo)
+        names = dict(SOURCES)
+        what = "全部" if only is None else "、".join(names.get(v, v) for v in sorted(only))
+        mark("analysis", "running", f"重新計算：{what}（其他沿用）" if only else "重新計算全部（成本、盈虧、資金流）")
+        before = summarize(_read_analysis(st.project))
         try:
-            (st.project / "snapshots").mkdir(exist_ok=True)
-            (st.project / "snapshots" / LAST_RESULT).write_text(json.dumps(
-                {k: R.get(k) for k in ("last", "error", "log", "sources", "summary", "hint")}, ensure_ascii=False, indent=1), encoding="utf-8")
-        except OSError:
-            pass
+            analysis_mod.run(st.project, only=only)
+            mark("analysis", "ok", f"已重新計算：{what}" + ("" if only is None else "（其他交易所沿用上次結果）"))
+            with st.lock:
+                st.refresh["summary"] = diff_summary(before, summarize(_read_analysis(st.project)))
+                if st.refresh["summary"]:
+                    st.refresh["summary"]["scope"] = sorted(only) if only else "all"
+                st.refresh.setdefault("timings", {})["analysis_" + ("full" if only is None else "partial")] = st.refresh["sources"]["analysis"]["duration_s"]
+        except BaseException as e:  # noqa: BLE001
+            mark("analysis", "failed", f"{type(e).__name__}: {e}"[:220])
+            with st.lock:
+                st.refresh["error"] = f"重新計算失敗：{type(e).__name__}: {e}"[:300]
+            traceback.print_exc()
+        with st.lock:
+            st.refresh["last"] = now_oslo().isoformat(timespec="seconds")
+            st.save()
+
+
+# ---------------------------------------------------------------- entry points
+def start_source(st: State, key: str) -> bool:
+    """Per-source 「⟳ 更新」: fetch only `key`, then recompute only that venue. False when it is already running."""
+    if key not in FETCH:
+        raise KeyError(key)
+    with st.lock:
+        if key in st.busy:
+            return False
+        st.busy.add(key)
+        st.refresh["busy"] = sorted(st.busy)
+        st.refresh.update(error=None, scope=key)
+        for row in ROWS_OF.get(key, (key,)):
+            st.refresh["sources"][row].update(status="pending", msg="", running=True)
+            st.refresh["sources"][row].pop("_t0", None)
+
+    def job():
+        _run_fetch(st, key, explicit=True)
+        request_analysis(st, {VENUE_OF.get(r, r) for r in ROWS_OF.get(key, (key,))})
+    threading.Thread(target=job, daemon=True).start()
+    return True
+
+
+def start_all(st: State) -> bool:
+    """Global 「抓取最新資料」: every source in parallel (sources already running on their own are left alone), then one
+    full recompute. False when a global refresh is already running."""
+    with st.lock:
+        if st.refresh["running"]:
+            return False
+        keys = [k for k in FETCH if k not in st.busy]
+        st.busy.update(keys)
+        old = st.refresh["sources"]
+        new = _blank_sources(old)
+        for k in new:                     # rows of sources that are running on their own keep their live state
+            if any(k in ROWS_OF.get(b, (b,)) for b in st.busy - set(keys)):
+                new[k] = old[k]
+        st.refresh.update(running=True, error=None, log=[], stage="開始…", pct=0, sources=new, summary=None, hint=None,
+                          busy=sorted(st.busy), scope="all")
+    threading.Thread(target=_refresh_all, args=(st, keys), daemon=True).start()
+    return True
+
+
+def _refresh_all(st: State, keys: list[str]) -> None:
+    import concurrent.futures as cf
+    R = st.refresh
+    t0 = time.time()
+    mark = _marker(st)
+    try:
+        _mark_robinhood(st, mark)
+        with cf.ThreadPoolExecutor(max_workers=max(1, len(keys)), thread_name_prefix="ab-src") as ex:
+            futs = {ex.submit(_run_fetch, st, k, False): k for k in keys}
+            for i, _ in enumerate(cf.as_completed(futs), 1):
+                with st.lock:
+                    left = [st.refresh["sources"][k]["label"] for k in keys if k in st.busy]
+                    R.update(pct=int(80 * i / len(keys)), stage=("等待：" + "、".join(left)) if left else "重新計算…")
+        R.setdefault("timings", {})["fetch_parallel"] = round(time.time() - t0, 1)
+        request_analysis(st, {"*"})
+        while True:                         # keep 'running' until the recompute is done (the button shows progress)
+            time.sleep(0.3)
+            with st.lock:
+                if not st.analysis_active:
+                    break
+        R.update(stage="完成", pct=100)
+        R["timings"]["full_refresh"] = round(time.time() - t0, 1)
+    except BaseException as e:  # noqa: BLE001
+        R["error"] = f"{type(e).__name__}: {e}"[:300]
+        R["stage"] = "失敗"
+        traceback.print_exc()
+    finally:
+        with st.lock:
+            R["running"] = False
+            R["last"] = now_oslo().isoformat(timespec="seconds")
+            st.save()
+
+
+def _refresh(st: State) -> None:
+    """Synchronous global refresh (CLI/tests): same as the button, waits until done."""
+    with st.lock:
+        keys = [k for k in FETCH if k not in st.busy]
+        st.busy.update(keys)
+        st.refresh.update(running=True, sources=_blank_sources(st.refresh.get("sources")), log=[], summary=None, error=None)
+    _refresh_all(st, keys)
 
 
 def _overrides_path(st: State) -> Path:
@@ -412,7 +579,8 @@ def make_handler(st: State, port: int):
                                    "cryptocom_credentials": __import__("assetsboard.cryptocom", fromlist=["available"]).available(),
                                    "ibkr_gateway": __import__("assetsboard.ibkr", fromlist=["available"]).available(0.3),
                                    "no_credentials_hint": None if all(src.values()) else no_creds_msg(),
-                                   "last_archive_run": runs[-1]["at"] if runs else None, "now": now_oslo().isoformat(timespec="seconds")})
+                                   "last_archive_run": runs[-1]["at"] if runs else None, "now": now_oslo().isoformat(timespec="seconds"),
+                                   "features": ["per_source"]})
             self._send(404, b'{"error":"not found"}')
 
         def do_POST(self):
@@ -432,7 +600,7 @@ def make_handler(st: State, port: int):
                 except (ValueError, TypeError, AttributeError):
                     return self._json({"error": "請輸入 0 或正數（USDT）"}, 400)
                 with st.lock:
-                    if st.refresh["running"]:
+                    if st.refresh["running"] or "mexc" in st.busy:
                         return self._json({"error": "正在抓取最新資料，請稍後再存"}, 409)
                 return self._json(set_mexc_earn(st, v))
             if self.path == "/api/app-total":
@@ -445,13 +613,21 @@ def make_handler(st: State, port: int):
                 except (ValueError, TypeError, AttributeError):
                     return self._json({"error": "請輸入正數（USDT）"}, 400)
                 return self._json(set_app_total(st, v))
-            with st.lock:   # without Bitget credentials the other sources still refresh (Bitget is marked skipped)
-                if st.refresh["running"]:
-                    return self._json({"started": False, "running": True})
-                st.refresh.update(running=True, error=None, log=[], stage="開始…", pct=0, sources=_blank_sources(),
-                                  summary=None, hint=None)
-            threading.Thread(target=_refresh, args=(st,), daemon=True).start()
-            self._json({"started": True})
+            # 「抓取最新資料」 (body {} → every source in parallel) or one section's 「⟳ 更新」 (body {"source": key})
+            try:
+                n = min(int(self.headers.get("Content-Length") or 0), 1000)
+                key = (json.loads(self.rfile.read(n) or b"{}") or {}).get("source")
+            except (ValueError, TypeError, AttributeError):
+                key = None
+            if key:
+                if key == "robinhood":
+                    return self._json({"started": False, "manual": True, "error": "Robinhood 沒有 API：傳截圖給投資顧問更新"}, 400)
+                if key not in FETCH:
+                    return self._json({"error": "unknown source"}, 400)
+                ok_ = start_source(st, key)
+                return self._json({"started": ok_, "running": not ok_, "source": key})
+            ok_ = start_all(st)
+            self._json({"started": ok_, "running": not ok_})
 
     return H
 

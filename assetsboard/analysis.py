@@ -15,6 +15,7 @@ Method (average cost, USDT):
 from __future__ import annotations
 
 import bisect
+import concurrent.futures as cf
 import datetime as dt
 import json
 import time
@@ -240,6 +241,9 @@ def load_overrides(path: Path) -> dict:
     return {**DEFAULT_OVERRIDES, **json.loads(path.read_text(encoding="utf-8"))}
 
 
+RECHECK_MS = 6 * 3600 * 1000     # a coin without today's candle is re-asked at most every 6 h
+
+
 class Prices:
     """Daily close (Oslo-agnostic UTC day index) per coin, cached on disk; public candles only."""
 
@@ -250,6 +254,7 @@ class Prices:
         self.keys = {c: sorted(t) for c, t in self.tab.items()}
         self.misses: list = []
         self.fetched = 0
+        self.checked: dict[str, int] = {c: int(v) for c, v in (doc.get("checked") or {}).items()}   # coin -> ms of last fetch
 
     @staticmethod
     def symbol(c: str) -> tuple[str, bool]:
@@ -263,31 +268,43 @@ class Prices:
         if self.offline:
             return
         today = int(time.time() * 1000) // DAY
+        todo = []
         for c in sorted(set(coins) - STABLE):
             have = self.keys.get(c) or []
             if have and have[-1] >= today - 1 and have[0] <= since_ms // DAY + 1:
                 continue
+            if self.checked.get(c, 0) > time.time() * 1000 - RECHECK_MS:
+                if not have:
+                    self.misses.append({"coin": c, "symbol": self.symbol(c)[0], "code": "cached"})
+                continue        # asked within 6 h: no newer candle yet (delisted / unknown symbol) or no older one exists
+            todo.append((c, bool(have and have[0] <= since_ms // DAY + 1)))
+
+        def one(c: str, shallow: bool):
             sym, inv = self.symbol(c)
-            tab = dict(self.tab.get(c) or {})
+            tab, code, n = dict(self.tab.get(c) or {}), None, 0
             now = int(time.time() * 1000)
-            ends = [now] if have and have[0] <= since_ms // DAY + 1 else [now, now - 199 * DAY]
-            code = None
-            for end in ends:
-                time.sleep(0.12)
+            for end in ([now] if shallow else [now, now - 199 * DAY]):
                 r = public_get("/api/v2/spot/market/history-candles", {"symbol": sym, "granularity": "1day", "endTime": end, "limit": 200})
-                self.fetched += 1
+                n += 1
                 code = r.get("code")
                 for k in r.get("data") or []:
                     p = float(k[4])
                     if p > 0:
                         tab[int(k[0]) // DAY] = 1 / p if inv else p
-            if tab:
-                self.tab[c] = tab
-                self.keys[c] = sorted(tab)
-            else:
-                self.misses.append({"coin": c, "symbol": sym, "code": code})
+            return c, sym, tab, code, n
+        # public market data, a few requests at a time (well under Bitget's 20 req/s public limit)
+        with cf.ThreadPoolExecutor(max_workers=4) as ex:
+            for c, sym, tab, code, n in ex.map(lambda x: one(*x), todo):
+                self.fetched += n
+                if tab:
+                    self.tab[c] = tab
+                    self.keys[c] = sorted(tab)
+                else:
+                    self.misses.append({"coin": c, "symbol": sym, "code": code})
+                self.checked[c] = int(time.time() * 1000)
         self.path.write_text(json.dumps({"updated": now_oslo().isoformat(timespec="seconds"),
-                                         "prices": {c: {str(k): v for k, v in t.items()} for c, t in self.tab.items()}}),
+                                         "prices": {c: {str(k): v for k, v in t.items()} for c, t in self.tab.items()},
+                                         "checked": self.checked}),
                              encoding="utf-8")
 
     def at(self, c: str, ts) -> float:
@@ -773,10 +790,34 @@ DATA_NOTES = [
 ]
 
 
-def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -> dict:
+VENUES = ("bitget", "mexc", "kraken", "cryptocom", "wallets", "etherfi_cash", "ibkr", "robinhood")
+# top-level keys of analysis_latest.json that are NOT the Bitget part (rebuilt on every run)
+_NOT_BITGET = set(VENUES[1:]) | {"exchanges", "combined", "generated_oslo", "partial"}
+
+
+def _previous(snap_dir: Path) -> dict | None:
+    p = snap_dir / "analysis_latest.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+    except (ValueError, OSError):
+        return None
+
+
+def run(project: Path, offline: bool = False, archive_dir: Path | None = None, only: set | None = None) -> dict:
+    """Full analysis, or with `only` = {venue, …} a fast path: those venues are recomputed and every other venue's
+    result is reused from the previous analysis_latest.json (its own last-updated time stays as it was); the merged
+    overview / groups are always rebuilt."""
     archive_dir = archive_dir or project / "archive"
     snap_dir = project / "snapshots"
     snap_dir.mkdir(exist_ok=True)
+    prev = _previous(snap_dir) if only is not None else None
+    if prev is not None and not all(k in prev for k in VENUES[1:]) :
+        prev = None                                   # older file without per-venue results → full run
+    reuse = (lambda v: prev is not None and v not in only)
+    if reuse("bitget"):
+        return _run_rest(project, archive_dir, snap_dir, offline,
+                         {k: v for k, v in prev.items() if k not in _NOT_BITGET}, prev, only,
+                         Prices(snap_dir / "price_cache.json", offline=True), load_overrides(snap_dir / "analysis_overrides.json"))
     arch = load_archive(archive_dir)
     snap, snap_path = latest_snapshot([archive_dir, snap_dir])
     if not arch.get("tax_spot"):
@@ -809,12 +850,23 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
                          "inventory_deficits": res.get("inventory_deficits")},
         "method": "平均成本法（USDT）。獎勵成本 0（另列收到時市值）；雙幣以行權價；網格返還幣以（投入 − 返還 USDT）分攤。",
     })
+    return _run_rest(project, archive_dir, snap_dir, offline, res, prev, only, prices, ov)
+
+
+def _run_rest(project: Path, archive_dir: Path, snap_dir: Path, offline: bool, res: dict, prev: dict | None,
+              only: set | None, prices, ov: dict) -> dict:
+    def venue(name: str, fn, fallback):
+        """Recompute a venue, or reuse its previous result on the fast path."""
+        if prev is not None and only is not None and name not in only and isinstance(prev.get(name), dict):
+            return prev[name]
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 - an optional venue never breaks the analysis
+            return fallback(e)
     # ---- MEXC (optional) and merged overview
     from . import mexc as mexc_mod
-    try:
-        mx = mexc_mod.analyze(project, archive_dir / "mexc", offline=offline, overrides=ov)
-    except Exception as e:  # noqa: BLE001 - never let the optional exchange break Bitget analysis
-        mx = {"present": False, "configured": mexc_mod.available(), "reason": f"MEXC 分析失敗：{type(e).__name__}: {e}"[:300]}
+    mx = venue("mexc", lambda: mexc_mod.analyze(project, archive_dir / "mexc", offline=offline, overrides=ov),
+               lambda e: {"present": False, "configured": mexc_mod.available(), "reason": f"MEXC 分析失敗：{type(e).__name__}: {e}"[:300]})
     o = res["overview"]
     ex = {"bitget": {"present": True, "total": o["total_auto"], "net_inflow": o["net_inflow"],
                      "pnl": o["total_auto"] - o["net_inflow"],
@@ -823,19 +875,15 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
           "mexc": {k: mx.get(k) for k in ("present", "configured", "reason", "total", "total_api", "earn", "earn_manual",
                                          "net_inflow", "pnl", "pnl_pct", "snapshot_time", "history_complete", "pnl_method")}}
     from . import kraken as kraken_mod
-    try:
-        kr = kraken_mod.analyze(project, archive_dir / "kraken", offline=offline)
-    except Exception as e:  # noqa: BLE001 - optional exchange
-        kr = {"present": False, "configured": kraken_mod.available(), "reason": f"Kraken 分析失敗：{type(e).__name__}: {e}"[:300]}
+    kr = venue("kraken", lambda: kraken_mod.analyze(project, archive_dir / "kraken", offline=offline),
+               lambda e: {"present": False, "configured": kraken_mod.available(), "reason": f"Kraken 分析失敗：{type(e).__name__}: {e}"[:300]})
     ex["kraken"] = {k: kr.get(k) for k in ("present", "configured", "reason", "total", "spot", "earn", "futures_at_cost",
                                             "net_inflow", "pnl", "pnl_pct", "snapshot_time", "history_complete", "fiat_deposits")}
     if kr.get("present") and kr.get("pnl") is None:   # no ledger yet: total counts, PnL unknown
         ex["kraken"]["net_inflow"] = None
     from . import cryptocom as cdc_mod
-    try:
-        cc = cdc_mod.analyze(project, archive_dir / "cryptocom", offline=offline)
-    except Exception as e:  # noqa: BLE001 - optional exchange
-        cc = {"present": False, "configured": cdc_mod.available(), "reason": f"Crypto.com 分析失敗：{type(e).__name__}: {e}"[:300]}
+    cc = venue("cryptocom", lambda: cdc_mod.analyze(project, archive_dir / "cryptocom", offline=offline),
+               lambda e: {"present": False, "configured": cdc_mod.available(), "reason": f"Crypto.com 分析失敗：{type(e).__name__}: {e}"[:300]})
     if cc.get("present") and cc.get("total") is None:
         cc = {**cc, "present": False, "reason": "Crypto.com 有快照但無法估值（查不到匯率／行情）"}
     ex["cryptocom"] = {k: cc.get(k) for k in ("present", "configured", "reason", "total", "earn", "net_inflow", "pnl", "pnl_pct",
@@ -847,10 +895,8 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
         ex["cryptocom"]["baseline"] = {"at": cc["baseline"].get("at"), "value": cc["baseline"].get("value_usdt"),
                                        "label": "自 " + (cc["baseline"].get("at") or "")[:10] + " 起計算"}
     from . import wallets as wallets_mod
-    try:
-        wl = wallets_mod.analyze(project, archive_dir / "wallets", offline=offline)
-    except Exception as e:  # noqa: BLE001 - optional
-        wl = {"present": False, "configured": True, "reason": f"鏈上錢包分析失敗：{type(e).__name__}: {e}"[:300]}
+    wl = venue("wallets", lambda: wallets_mod.analyze(project, archive_dir / "wallets", offline=offline),
+               lambda e: {"present": False, "configured": True, "reason": f"鏈上錢包分析失敗：{type(e).__name__}: {e}"[:300]})
     if wl.get("present") and wl.get("total") is None:
         wl = {**wl, "present": False, "reason": "鏈上錢包有快照但無法估值"}
     ex["wallets"] = {k: wl.get(k) for k in ("present", "configured", "reason", "total", "net_inflow", "pnl", "pnl_pct",
@@ -867,10 +913,8 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
                           "reason": "pending"}
 
     from . import ibkr as ibkr_mod
-    try:
-        ib = ibkr_mod.analyze(project, archive_dir / "ibkr", offline=offline)
-    except Exception as e:  # noqa: BLE001 - optional
-        ib = {"present": False, "configured": False, "reason": f"IBKR 分析失敗：{type(e).__name__}: {e}"[:300]}
+    ib = venue("ibkr", lambda: ibkr_mod.analyze(project, archive_dir / "ibkr", offline=offline),
+               lambda e: {"present": False, "configured": False, "reason": f"IBKR 分析失敗：{type(e).__name__}: {e}"[:300]})
     if ib.get("present") and ib.get("total") is None:     # no FX rate: cannot be merged
         ib = {**ib, "present": False, "reason": f"IBKR 有快照但查不到 {ib.get('base_currency')}→USD 匯率，未併入合計"}
     ex["ibkr"] = {k: ib.get(k) for k in ("present", "configured", "reason", "total", "net_inflow", "pnl", "snapshot_time",
@@ -886,10 +930,8 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
         ex["ibkr"]["baseline"] = {"at": fl.get("account_start"), "value": fl.get("opening_value"),
                                   "label": ("開戶以來（Flex，至 " if fl.get("complete") else "Flex 期間（自 ") + f"{fl.get('coverage_to') if fl.get('complete') else fl.get('account_start')}）"}
     from . import robinhood as rh_mod
-    try:
-        rh = rh_mod.analyze(project, archive_dir / "robinhood", offline=offline)
-    except Exception as e:  # noqa: BLE001 - optional, manual module
-        rh = {"present": False, "configured": False, "reason": f"Robinhood 分析失敗：{type(e).__name__}: {e}"[:300]}
+    rh = venue("robinhood", lambda: rh_mod.analyze(project, archive_dir / "robinhood", offline=offline),
+               lambda e: {"present": False, "configured": False, "reason": f"Robinhood 分析失敗：{type(e).__name__}: {e}"[:300]})
     ex["robinhood"] = {k: rh.get(k) for k in ("present", "configured", "reason", "total", "net_inflow", "pnl", "pnl_pct",
                                                "snapshot_time", "split", "total_eur", "pnl_eur", "net_deposits_eur",
                                                "value_method", "usdt_per_eur", "last_date", "split_net",
@@ -987,7 +1029,10 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
     res["wallets"] = wl
     from . import etherfi_cash as efc_mod
     try:
-        efc = efc_mod.analyze(project, archive_dir / "etherfi_cash", offline=offline,
+        # fast path: not refreshing ether.fi → use its latest snapshot (no live fetch), still re-derive coverage from the new PnL
+        # fast path: the per-source refresh has just written a fresh ether.fi snapshot → no second live read
+        efc_off = offline or (prev is not None and only is not None)
+        efc = efc_mod.analyze(project, archive_dir / "etherfi_cash", offline=efc_off,
                               investment_pnl=res["combined"].get("pnl"))
     except Exception as e:  # noqa: BLE001
         efc = {"present": False, "configured": False, "group": "spending",
@@ -1027,6 +1072,9 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
                                        f"IBKR：自 {(ib['baseline'] or {}).get('at', '')[:10]} 基準起算（TWS 讀不到出入金），")
                                       + f"以 1 {ib['base_currency']} ≈ {ib['usdt_per_base']:.6g} USDT 換算。")
     out = snap_dir / "analysis_latest.json"
+    res["generated_oslo"] = now_oslo().isoformat(timespec="seconds")
+    res["partial"] = ({"recomputed": sorted(only), "reused_from": (prev or {}).get("generated_oslo")}
+                      if prev is not None and only is not None else None)
     out.write_text(json.dumps(res, ensure_ascii=False, indent=1, default=float), encoding="utf-8")
     res["_path"] = str(out)
     return res

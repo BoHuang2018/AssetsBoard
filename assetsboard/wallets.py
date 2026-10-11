@@ -127,36 +127,71 @@ def fetch_arbitrum(address: str) -> dict:
     return {"chain": "arbitrum", "address": addr, "tokens": tokens, "source": "arbitrum-rpc"}
 
 
+def _tao(v) -> float | None:
+    """'0.235 TAO' / '0.235' / 0.235 → 0.235; None when absent/unparseable."""
+    if v is None:
+        return None
+    try:
+        return float(str(v).replace(",", "").split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def parse_taoscan(d: dict, address: str = "") -> dict:
+    """taoscan.online /api/account/<ss58>. Two response shapes are supported:
+    - current (2026-10): {"free": "0.235 TAO", "freeRao": "235501935", "staked": "0.407 TAO",
+      "positions": [{"netuid", "taoRao", "tao": "0.407 TAO", ...}], ...}  (subnet α stakes valued in TAO by taoscan)
+    - older: {"balance": {"freeTao", "reservedTao", "frozenTao", "nonce"}, "stakes": [...], "totals": {"stakeValueTao"}}
+    An unrecognised shape raises WalletError instead of silently reading 0."""
+    if not isinstance(d, dict):
+        raise WalletError("taoscan 回傳格式無法辨識")
+    if "freeRao" in d or "free" in d or "positions" in d:
+        free = int(d["freeRao"]) / 1e9 if d.get("freeRao") not in (None, "") else (_tao(d.get("free")) or 0.0)
+        reserved = int(d["reservedRao"]) / 1e9 if d.get("reservedRao") not in (None, "") else (_tao(d.get("reserved")) or 0.0)
+        frozen = int(d["frozenRao"]) / 1e9 if d.get("frozenRao") not in (None, "") else (_tao(d.get("frozen")) or 0.0)
+        pos = d.get("positions") or []
+        if pos:
+            stake = sum((int(x["taoRao"]) / 1e9) if x.get("taoRao") not in (None, "") else (_tao(x.get("tao")) or 0.0) for x in pos)
+        else:
+            stake = _tao(d.get("staked")) or 0.0
+        nonce, block, n_st = d.get("nonce"), d.get("blockNumber"), len(pos)
+        subnets = [{"netuid": x.get("netuid"), "name": x.get("name"), "tao": (int(x["taoRao"]) / 1e9) if x.get("taoRao") else _tao(x.get("tao")),
+                    "alpha": x.get("stake")} for x in pos]
+    elif "balance" in d:
+        bal = d.get("balance") or {}
+        free = float(bal.get("freeTao") or 0)
+        reserved = float(bal.get("reservedTao") or 0)
+        frozen = float(bal.get("frozenTao") or 0)
+        stakes = d.get("stakes") or []
+        stake = 0.0
+        for st in stakes:
+            for k in ("stakeTao", "tao", "amountTao", "amount"):
+                if st.get(k) is not None:
+                    try:
+                        stake += float(st[k])
+                        break
+                    except (TypeError, ValueError):
+                        pass
+        totals = d.get("totals") or {}
+        if totals.get("stakeValueTao") is not None:
+            try:
+                stake = float(totals["stakeValueTao"])
+            except (TypeError, ValueError):
+                pass
+        nonce, block, n_st, subnets = bal.get("nonce"), d.get("blockNumber"), len(stakes), []
+    else:
+        raise WalletError("taoscan 回傳格式無法辨識（沒有 free／balance 欄位）；不當作 0 TAO")
+    total = free + reserved + stake
+    tok = {"symbol": "TAO", "amount": total, "free": free, "reserved": reserved, "frozen": frozen, "staked": stake,
+           "contract": None, "decimals": 9}
+    if subnets:
+        tok["subnets"] = subnets
+    return {"chain": "bittensor", "address": d.get("address") or address, "tokens": [tok], "nonce": nonce,
+            "block": block, "source": "taoscan.online", "raw_stakes": n_st}
+
+
 def fetch_bittensor(address: str) -> dict:
-    d = _http_json(TAOSCAN + address)
-    bal = d.get("balance") or {}
-    free = float(bal.get("freeTao") or 0)
-    reserved = float(bal.get("reservedTao") or 0)
-    frozen = float(bal.get("frozenTao") or 0)
-    stakes = d.get("stakes") or []
-    stake_tao = 0.0
-    for s in stakes:
-        for k in ("stakeTao", "tao", "amountTao", "amount"):
-            if s.get(k) is not None:
-                try:
-                    stake_tao += float(s[k])
-                    break
-                except (TypeError, ValueError):
-                    pass
-    totals = d.get("totals") or {}
-    if totals.get("stakeValueTao") is not None:
-        try:
-            stake_tao = float(totals["stakeValueTao"])
-        except (TypeError, ValueError):
-            pass
-    tokens = []
-    liquid = free  # reserved/frozen still "owned"; show separately
-    total_tao = free + reserved + stake_tao
-    if total_tao > 0 or True:
-        tokens.append({"symbol": "TAO", "amount": total_tao, "free": free, "reserved": reserved,
-                       "frozen": frozen, "staked": stake_tao, "contract": None, "decimals": 9})
-    return {"chain": "bittensor", "address": address, "tokens": tokens, "nonce": bal.get("nonce"),
-            "block": d.get("blockNumber"), "source": "taoscan.online", "raw_stakes": len(stakes)}
+    return parse_taoscan(_http_json(TAOSCAN + address), address)
 
 
 def prices() -> dict[str, float]:
@@ -225,13 +260,31 @@ def build_snapshot(root: Path, t: dt.datetime | None = None, px: dict | None = N
             })
         except WalletError as e:
             errors[str(wid)] = str(e)[:240]
-            items.append({"id": wid, "label": w.get("label") or wid, "chain": chain, "address": addr,
-                          "note": w.get("note"), "tokens": [], "value_usdt": None, "unpriced": [], "error": str(e)[:240]})
+            item = {"id": wid, "label": w.get("label") or wid, "chain": chain, "address": addr,
+                    "note": w.get("note"), "tokens": [], "value_usdt": None, "unpriced": [], "error": str(e)[:240]}
+            prev = _last_good(root, str(wid))      # a temporary API outage must not read as "wallet emptied"
+            if prev:
+                toks, val, unp = value_tokens([{k: v for k, v in tk.items() if k not in ("price_usdt", "value_usdt")}
+                                               for tk in prev["tokens"]], px)
+                item.update(tokens=toks, value_usdt=val, unpriced=unp, carried_from=prev["at"])
+            items.append(item)
     total = sum(i["value_usdt"] or 0 for i in items)
     ok = any(i.get("value_usdt") is not None and not i.get("error") for i in items)
     return {"exchange": "wallets", "captured_oslo": t.isoformat(timespec="seconds"), "ok": ok,
             "wallets": items, "total_usdt": total if ok else None, "prices": {k: px[k] for k in sorted(px)},
             "errors": errors, "n_configured": len(wallets)}
+
+
+def _last_good(root: Path, wid: str) -> dict | None:
+    """Most recent snapshot in which this wallet was read without error: {'at', 'tokens'}."""
+    files = sorted((p for p in root.rglob("wallets_snapshot_*.json") if not p.name.startswith("._")),
+                   key=lambda p: p.name, reverse=True) if root.exists() else []
+    for p in files[:60]:
+        doc = _rj(p, {})
+        for w in doc.get("wallets") or []:
+            if str(w.get("id")) == wid and not w.get("error") and w.get("value_usdt") is not None and not w.get("carried_from"):
+                return {"at": doc.get("captured_oslo"), "tokens": w.get("tokens") or []}
+    return None
 
 
 def write_snapshot(directory: Path, doc: dict, t: dt.datetime) -> Path:
@@ -302,6 +355,7 @@ def archive_run(root: Path, progress: bool = True) -> dict:
                                   "total": snap.get("n_configured", 0), "earliest": None, "calls": snap.get("n_configured", 0)}
     rep["total_usdt"] = snap.get("total_usdt")
     rep["wallets"] = [{"id": w["id"], "value_usdt": w.get("value_usdt"), "error": w.get("error"),
+                       "carried_from": w.get("carried_from"),
                        "tokens": [(t["symbol"], t["amount"]) for t in w.get("tokens") or []]} for w in snap.get("wallets") or []]
     st = _rj(root / "state.json", {})
     st["last_run"] = rep["captured_oslo"]

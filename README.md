@@ -115,11 +115,22 @@ Use at your own risk. This is personal portfolio tooling, not financial advice.
 
 - **⟳ 抓取最新資料** (top right) fetches every configured source **read-only** — Bitget, MEXC, Kraken, Crypto.com,
   on-chain wallets, ether.fi Cash, IBKR via IB Gateway (only if port 4001 is open; otherwise the previous snapshot is
-  kept) and the IBKR Flex deposit catch-up (HTTP, at most every 6 h) — then recomputes the analysis (1–3 min).
+  kept) and the IBKR Flex deposit catch-up (HTTP, at most every 6 h) — then recomputes the analysis (about 1 min).
   Each source is independent: one failing never blocks the others. Robinhood has no API (screenshots, manual).
 - Below the button: 「上次更新 HH:MM」 and one dot per source; click it for the panel with each source's status
   (✓ 已更新 / ⚠ 部分失敗 / ✗ 失敗 + reason / ⏸ 沿用上次 / ✎ 手動), the time of the data the dashboard uses, and what
   changed (total value, PnL, per-venue). The last result is saved in `snapshots/refresh_last.json`.
+- The sources are fetched **in parallel** (thread pool; Bitget's history endpoints are also fetched 4 at a time), so the
+  whole refresh takes about as long as the slowest source plus one recompute.
+- **Per-section 「⟳ 更新」**: each venue tab (top bar), each row of the 總覽 table and each row of the status panel has
+  its own button with the section's data time and last fetch time/duration. It fetches only that source and then
+  recomputes only that venue (`analyze` fast path: every other venue's result is reused from the previous
+  `analysis_latest.json`; the combined totals are rebuilt). The same source never runs twice at once; different sources
+  can run at the same time; recomputes are queued and merged. IBKR's button = Gateway snapshot (only if port 4001 is
+  open — otherwise it says so) + Flex catch-up, which an explicit click may retry after 15 min instead of 6 h.
+  Robinhood shows 「✎ 手動（傳截圖給投資顧問）」 instead of a button.
+- On-chain wallets: if a wallet API is temporarily down, the wallet keeps its last good amounts (repriced) and is
+  shown as ⚠ with the reason, instead of counting as 0.
 - A **browser reload** (⌘R) only re-reads the saved data; it never fetches anything.
 
 ### IBKR: manual live refresh (no scheduled Gateway)

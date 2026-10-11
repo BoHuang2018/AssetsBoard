@@ -224,6 +224,12 @@ class FlexCatchUp(unittest.TestCase):
         F.note_catch_up(self.root, rng, False, "x")
         self.assertFalse(F.catch_up_due(self.root, rng))
         self.assertTrue(F.catch_up_due(self.root, ("20260102", "20260108")))
+        # an explicit IBKR 「⟳ 更新」 click may retry after 15 min (not 6 h)
+        from assetsboard.client import now_oslo
+        later = now_oslo() + dt.timedelta(minutes=16)
+        self.assertFalse(F.catch_up_due(self.root, rng, now=later, min_hours=F.AUTO_MIN_HOURS))
+        self.assertTrue(F.catch_up_due(self.root, rng, now=later, min_hours=F.CLICK_MIN_HOURS))
+        self.assertFalse(F.catch_up_due(self.root, rng, now=now_oslo() + dt.timedelta(minutes=5), min_hours=F.CLICK_MIN_HOURS))
 
     def test_fd_without_td_rejected(self):
         with self.assertRaises(F.FlexError):

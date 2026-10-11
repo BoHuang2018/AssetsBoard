@@ -58,6 +58,26 @@ class Bittensor(unittest.TestCase):
         self.assertAlmostEqual(d["tokens"][0]["amount"], 0.118168306)
         self.assertEqual(d["tokens"][0]["symbol"], "TAO")
 
+    def test_parses_current_taoscan_shape(self):
+        # 2026-10 shape: free/staked strings + Rao integers + subnet positions (fake address/hotkey)
+        payload = {"address": "5Fake", "nonce": "8", "free": "0.235 TAO", "reserved": "0 TAO", "frozen": "0 TAO",
+                   "freeRao": "235501935", "staked": "0.407 TAO",
+                   "positions": [{"netuid": 9, "name": "x", "hotkey": "5Hot", "stakeRao": "16607641952", "stake": "16.6 α",
+                                  "taoRao": "407223864", "tao": "0.407 TAO"}], "positionCount": 1}
+        with mock.patch.object(W, "_http_json", return_value=payload):
+            d = W.fetch_bittensor("5Fake")
+        t = d["tokens"][0]
+        self.assertAlmostEqual(t["free"], 0.235501935)
+        self.assertAlmostEqual(t["staked"], 0.407223864)
+        self.assertAlmostEqual(t["amount"], 0.235501935 + 0.407223864)
+        self.assertEqual(t["subnets"][0]["netuid"], 9)
+        self.assertEqual(d["raw_stakes"], 1)
+
+    def test_unknown_shape_is_an_error_not_zero(self):
+        with mock.patch.object(W, "_http_json", return_value={"address": "5Fake", "hello": 1}):
+            with self.assertRaises(W.WalletError):
+                W.fetch_bittensor("5Fake")
+
 
 class Snapshot(unittest.TestCase):
     def setUp(self):
@@ -82,6 +102,26 @@ class Snapshot(unittest.TestCase):
         self.assertAlmostEqual(a["total"], 500.0)
         self.assertAlmostEqual(a["pnl"], 0.0)
         self.assertEqual(a["net_inflow"], 500.0)
+
+
+    def test_outage_carries_last_good_amount(self):
+        arb = {"chain": "arbitrum", "address": "0x3f…", "tokens": [{"symbol": "USDC", "amount": 100.0}], "source": "t"}
+        tao = {"chain": "bittensor", "address": "5D…", "tokens": [{"symbol": "TAO", "amount": 1.0, "free": 1.0, "reserved": 0, "frozen": 0, "staked": 0}], "source": "t"}
+        px = {"USDC": 1.0, "TAO": 400.0}
+        with mock.patch.object(W, "fetch_arbitrum", return_value=arb), \
+             mock.patch.object(W, "fetch_bittensor", return_value=tao), mock.patch.object(W, "prices", return_value=px):
+            W.archive_run(self.root)
+        import time; time.sleep(1.1)       # snapshot file names are per second/minute stamped; ensure ordering
+        px2 = {"USDC": 1.0, "TAO": 300.0}
+        with mock.patch.object(W, "fetch_arbitrum", return_value=arb), \
+             mock.patch.object(W, "fetch_bittensor", side_effect=W.WalletError("HTTP 502 taoscan")), \
+             mock.patch.object(W, "prices", return_value=px2):
+            snap = W.build_snapshot(self.root)
+        tw = next(w for w in snap["wallets"] if w["chain"] == "bittensor")
+        self.assertIn("502", tw["error"])
+        self.assertTrue(tw["carried_from"])
+        self.assertAlmostEqual(tw["value_usdt"], 300.0)            # last good amount × today's price
+        self.assertAlmostEqual(snap["total_usdt"], 400.0)
 
 
 if __name__ == "__main__":
