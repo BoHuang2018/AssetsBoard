@@ -479,7 +479,7 @@ def refresh_message(rep: dict) -> str:
     if not rep.get("snapshot"):
         why = "; ".join(e.get("msg", "") for k in ("gateway", "incomplete") for e in errs.get(k) or [])[:140]
         return ("IBKR 未更新：Gateway 有連上但沒回傳淨值（常見於剛登入、資料伺服器還在連線），"
-                "沿用上次快照；等 1 分鐘再按重新整理" + (f"（{why}）" if why else ""))
+                "沿用上次快照；等 1 分鐘再按「抓取最新資料」" + (f"（{why}）" if why else ""))
     extra = [k for k in errs if k != "snapshot"]
     return "IBKR 已更新（" + rep["captured_oslo"][11:16] + "）" + ("；重試後成功" if rep.get("retried") else "") + \
         (f"；部分項目未完整：{', '.join(extra)}" if extra else "")
@@ -570,7 +570,7 @@ def analyze(project: Path, archive_root: Path | None = None, offline: bool = Fal
         "snapshot_age_hours": (now_oslo() - dt.datetime.fromisoformat(snap["captured_oslo"])).total_seconds() / 3600
         if snap.get("captured_oslo") else None,
         "notes": ([f"⚠ 出入金（Flex）只涵蓋至 {fx_.get('coverage_to')}，比快照早 {flex_lag} 天：這段期間的入金尚未計入淨入金，盈虧可能偏高。"
-                   f"按「重新整理」會自動補抓 Flex（HTTP，不需 Gateway），或執行 {cli_cmd()} ibkr-flex-fetch。"] if flex_stale else []) + [
+                   f"按「抓取最新資料」會自動補抓 Flex（HTTP，不需 Gateway），或執行 {cli_cmd()} ibkr-flex-fetch。"] if flex_stale else []) + [
             f"資料來自本機 IB Gateway（唯讀 API，帳戶 {snap['account']}），在 Mac 讀取後匯出給 box。",
             f"本頁以基礎貨幣 {base} 顯示；合併總覽以 1 {base} ≈ {k:.6g} USDT 換算（匯率：{fx_src}）。" if k else f"⚠ 查不到 {base}→USD 匯率，無法併入合計。",
             note or ("TWS API 讀不到入金／出金紀錄：盈虧以基準（" + ((bl or {}).get("at") or "—")[:16].replace("T", " ") + "）起算，"

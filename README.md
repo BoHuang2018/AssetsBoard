@@ -111,6 +111,17 @@ Use at your own risk. This is personal portfolio tooling, not financial advice.
 ```
 餘額與 Arbitrum USDC 儲值來自公開瀏覽器 API；卡片商戶明細無公開 API，里程碑涵蓋率以儲值為開銷代理。開銷帳戶 float **不計入**投資總額／投資盈虧。
 
+### 「抓取最新資料」 button vs. browser reload
+
+- **⟳ 抓取最新資料** (top right) fetches every configured source **read-only** — Bitget, MEXC, Kraken, Crypto.com,
+  on-chain wallets, ether.fi Cash, IBKR via IB Gateway (only if port 4001 is open; otherwise the previous snapshot is
+  kept) and the IBKR Flex deposit catch-up (HTTP, at most every 6 h) — then recomputes the analysis (1–3 min).
+  Each source is independent: one failing never blocks the others. Robinhood has no API (screenshots, manual).
+- Below the button: 「上次更新 HH:MM」 and one dot per source; click it for the panel with each source's status
+  (✓ 已更新 / ⚠ 部分失敗 / ✗ 失敗 + reason / ⏸ 沿用上次 / ✎ 手動), the time of the data the dashboard uses, and what
+  changed (total value, PnL, per-venue). The last result is saved in `snapshots/refresh_last.json`.
+- A **browser reload** (⌘R) only re-reads the saved data; it never fetches anything.
+
 ### IBKR: manual live refresh (no scheduled Gateway)
 
 The weekly LaunchAgent does **not** open or query IB Gateway. For live NAV/positions:
@@ -125,7 +136,7 @@ with old Flex data overstates PnL after a new deposit. To keep them in step:
 
 - `ibkr-flex-fetch` now **catches up** from the last imported day to the last finished business day (Flex Web Service
   `fd`/`td` override, a few days of overlap; imports de-duplicate). `--query-period` uses the query's own period instead.
-- The app's **重新整理** button does the same catch-up automatically (HTTP only, at most once per 6 h per target day),
+- The app's **抓取最新資料** button does the same catch-up automatically (HTTP only, at most once per 6 h per target day),
   whether or not Gateway is open. Deposits made today show up after the next business day.
 - If Gateway answers but returns no NAV (typical right after login), the refresh retries once after 10 s and otherwise
   says **IBKR 未更新** (the old snapshot stays) instead of "updated".
