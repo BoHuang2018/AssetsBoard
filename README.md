@@ -163,5 +163,9 @@ Robinhood EU has no API for this account, so the module works from your **Histor
   unless a Portfolio screenshot (≤ 3 days old and newer than the last ledger row) is set; then that total is used.
 - Cash = deposits − withdrawals + sells + dividends − buys (+ sign-up rewards if `archive/robinhood/config.json` says
   `"rewards_paid_as": "cash"`; default `crypto`). Crypto sold without a visible buy is treated as reward coins (cost 0).
+- PnL split (average-cost method per asset): **realized** = closed sells (trading) + dividends; **unrealized** = held value −
+  remaining cost; **sign-up rewards** = proceeds of reward coins sold + value of reward coins still held (cost €0), shown as
+  their own line. realized + unrealized + rewards + residual = total PnL; the residual is the Portfolio screenshot vs ledger
+  difference (e.g. cash). Per-asset table on the Robinhood tab; the overview row shows the three parts too.
 - PnL = value − net bank deposits (EUR), converted at the current EUR rate (so the % equals the EUR %).
 - Overview: stock tokens + cash count as **securities**, the crypto part as **crypto**. Net deposits are split the same way: the cost of crypto bought with Robinhood cash counts as crypto inflow (reward coins cost 0), the rest stays with securities.

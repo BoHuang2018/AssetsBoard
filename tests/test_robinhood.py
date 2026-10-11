@@ -126,3 +126,34 @@ def test_stake_is_not_cash_and_round_trip_trade():
     assert {h["asset"] for h in d["holdings"]} == {"ETH", "ABCX"}
     with pytest.raises(rh.LedgerError):
         rh.parse_line("2026-01-02 stake ETH 40.00")
+
+
+def test_realized_unrealized_rewards_reconcile(tmp_path: Path, monkeypatch):
+    root = tmp_path / "archive" / "robinhood"
+    rh.add_rows(root, [rh.parse_line(l) for l in (
+        "2026-03-01 deposit 100", "2026-03-01 reward 10", "2026-03-01 reward 10",
+        "2026-03-02 token-buy ACME 2 25 -50.00", "2026-03-03 token-sell ACME 1 30 30.00",   # avg 25 → realized +5
+        "2026-03-03 market-sell XYZ 10 1.2 12.00",                                          # reward coin, cost 0
+        "2026-03-04 market-buy ABC 100 0.10 -10.00", "2026-03-05 market-sell ABC 100 0.12 12.00",   # round trip +2
+        "2026-03-06 dividend ACME 0.50")])
+    (root / "prices.json").write_text(json.dumps({"eur_usd": 1.0, "usdt_per_usd": 1.0, "fx_source": "test",
+                                                  "usd": {"ACME": 40.0}, "src": {}}), encoding="utf-8")
+    a = rh.analyze(tmp_path, root, offline=True)          # estimate mode
+    S = a["pnl_split"]
+    assert abs(S["realized_trading_eur"] - 7.0) < 1e-9 and abs(S["dividends_eur"] - 0.5) < 1e-9
+    assert abs(S["unrealized_eur"] - (40 - 25)) < 1e-9                       # 1 ACME left at avg cost 25
+    assert abs(S["reward_sold_eur"] - 12.0) < 1e-9 and abs(S["reward_held_eur"] - 10.0) < 1e-9   # 1 reward coin left (receipt value)
+    assert abs(S["realized_eur"] + S["unrealized_eur"] + S["rewards_eur"] + S["residual_eur"] - a["pnl_eur"]) < 1e-9
+    assert abs(S["residual_eur"]) < 1e-9
+    abc = next(x for x in S["positions"] if x["asset"] == "ABC")
+    assert abc["qty"] == 0.0 and abs(abc["realized_trading_eur"] - 2.0) < 1e-9
+    xyz = next(x for x in S["positions"] if x["asset"] == "XYZ")
+    assert abs(xyz["reward_realized_eur"] - 12.0) < 1e-9 and abs(xyz["realized_trading_eur"]) < 1e-9
+    # screenshot: cash 0.03 higher than the ledger → shows up as residual / cash gap
+    monkeypatch.setattr(rh, "now_oslo", lambda: __import__("datetime").datetime(2026, 3, 7, 12, tzinfo=rh.OSLO))
+    cash = a["cash_eur"]
+    rh.save_portfolio(root, cash + 0.03 + 40 + 10, cash_eur=cash + 0.03, at="2026-03-07T10:00+02:00")
+    b = rh.analyze(tmp_path, root, offline=True)
+    T = b["pnl_split"]
+    assert abs(T["cash_gap_eur"] - 0.03) < 1e-9 and abs(T["residual_eur"] - 0.03) < 1e-9
+    assert abs(T["realized_eur"] + T["unrealized_eur"] + T["rewards_eur"] + T["residual_eur"] - b["pnl_eur"]) < 1e-9

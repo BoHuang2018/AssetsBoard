@@ -351,11 +351,25 @@ def derive(rows: list[dict], rewards_paid_as: str = "crypto") -> dict:
                              "avg_cost_eur": p["cost"] / p["qty"], "realized_eur": p["realized"], "qty_estimated": p["qty_estimated"],
                              "staked_qty": min(p["staked"], p["qty"])})
     realized = {a: p["realized"] for a, p in pos.items() if abs(p["realized"]) > 0.004}
+    # per-asset ledger (average-cost method). Reward-coin sells (no visible acquisition) have cost 0: their proceeds are
+    # reported as reward_realized, separate from trading realized, so rewards show as their own line.
+    rew_by = defaultdict(float)
+    for u in unknown_sells:
+        rew_by[u["asset"]] += u["eur"]
+    positions = []
+    for a, p in sorted(pos.items()):
+        if not (p["buys"] or p["sells"] or p["qty"] > 1e-9):
+            continue
+        held = p["qty"] > 1e-9
+        positions.append({"asset": a, "kind": p["kind"], "qty": p["qty"] if held else 0.0, "cost_eur": p["cost"] if held else 0.0,
+                          "avg_cost_eur": p["cost"] / p["qty"] if held else None, "buys": p["buys"], "sells": p["sells"],
+                          "realized_trading_eur": p["realized"] - rew_by.get(a, 0.0), "reward_realized_eur": rew_by.get(a, 0.0),
+                          "staked_qty": min(p["staked"], p["qty"]) if held else 0.0, "qty_estimated": p["qty_estimated"]})
     kinds = {a: p["kind"] for a, p in pos.items()}
     return {"holdings": holdings, "cash_eur": cash, "deposits_eur": dep, "withdrawals_eur": wd, "net_deposits_eur": dep - wd,
             "rewards_eur": rew, "dividends_eur": div, "fees_eur": fee_rows, "implied_fees_eur": implied_fees,
             "rewards_unknown": rewards_unknown, "unknown_cost_sells": unknown_sells, "sold_unknown_assets": sold_unknown_assets,
-            "unknown_reward_coins_left": n_left, "kinds": kinds, "unknown_reward_coins_left_eur": left_eur, "realized_eur": realized,
+            "unknown_reward_coins_left": n_left, "kinds": kinds, "unknown_reward_coins_left_eur": left_eur, "realized_eur": realized, "positions": positions,
             "cash_if_rewards_cash_eur": cash + (sum(x["eur"] for x in rewards_unknown) if rewards_paid_as != "cash" else 0.0)}
 
 
@@ -426,6 +440,43 @@ def analyze(project: Path, root: Path | None = None, offline: bool = False) -> d
                  "reward_crypto_held_vs_receipt_eur": reward_crypto_eur - d["unknown_reward_coins_left_eur"],
                  "stock_realized_eur": stock_real, "stock_unrealized_eur": stock_eur - stock_cost, "dividends_eur": d["dividends_eur"]}
     breakdown["other_eur"] = (total_eur - net) - sum(breakdown.values())   # screenshot vs estimate, crypto price moves, rounding
+    # ---- realized / unrealized / rewards (average cost; reward coins cost 0)
+    hv = {h["asset"]: h for h in d["holdings"]}
+    per = []
+    for x in d["positions"]:
+        h = hv.get(x["asset"])
+        val = h["value_eur"] if h else 0.0
+        unr = (val - x["cost_eur"]) if h and h.get("unrealized_eur") is not None else 0.0
+        per.append({**x, "price_eur": h.get("price_eur") if h else None, "value_eur": val, "unrealized_eur": unr,
+                    "unrealized_pct": unr / x["cost_eur"] * 100 if h and x["cost_eur"] > 0 else None,
+                    "pnl_eur": x["realized_trading_eur"] + x["reward_realized_eur"] + unr, "priced": bool(h and h.get("price_eur") is not None)})
+    if reward_crypto_eur > 0.005:
+        per.append({"asset": "獎勵幣（未辨識）", "kind": "crypto", "qty": None, "cost_eur": 0.0, "avg_cost_eur": 0.0, "buys": 0, "sells": 0,
+                    "realized_trading_eur": 0.0, "reward_realized_eur": 0.0, "staked_qty": 0.0, "qty_estimated": False,
+                    "price_eur": None, "value_eur": reward_crypto_eur, "unrealized_eur": 0.0, "unrealized_pct": None,
+                    "reward_held_eur": reward_crypto_eur, "pnl_eur": reward_crypto_eur, "priced": False, "reward": True})
+    real_trade = sum(x["realized_trading_eur"] for x in per)
+    unreal = sum(x["unrealized_eur"] for x in per)
+    rew_sold = sum(x["reward_realized_eur"] for x in per)
+    rew_held = reward_crypto_eur + sum(x["value_eur"] for x in per if not x.get("reward") and x["cost_eur"] == 0 and x["value_eur"] > 0)
+    unreal -= sum(x["value_eur"] for x in per if not x.get("reward") and x["cost_eur"] == 0 and x["value_eur"] > 0)  # reward coins with known qty
+    div = d["dividends_eur"]
+    pf_cash_gap = (float(pf["cash_eur"]) - d["cash_eur"]) if use_pf and pf.get("cash_eur") is not None else 0.0
+    residual = pnl_eur - (real_trade + div + unreal + rew_sold + rew_held)
+    pc = (lambda v: v / net * 100 if net > 0 else None)
+    pnl_split = {"method": "平均成本法（每個資產各自計算；買入金額含價差／費用）。sign-up 獎勵幣成本 €0：賣出所得與仍持有的價值都歸「獎勵」，不算在交易盈虧。",
+                 "realized_trading_eur": real_trade, "dividends_eur": div, "realized_eur": real_trade + div,
+                 "unrealized_eur": unreal, "reward_sold_eur": rew_sold, "reward_held_eur": rew_held, "rewards_eur": rew_sold + rew_held,
+                 "rewards_received_eur": d["rewards_eur"], "residual_eur": residual, "cash_gap_eur": pf_cash_gap,
+                 "price_gap_eur": residual - pf_cash_gap, "total_eur": pnl_eur,
+                 "realized_incl_reward_sells_eur": real_trade + div + rew_sold,
+                 "pct": {"realized": pc(real_trade + div), "unrealized": pc(unreal), "rewards": pc(rew_sold + rew_held),
+                         "residual": pc(residual), "total": pc(pnl_eur)},
+                 "residual_note": ("差額＝Portfolio 截圖現金 − 紀錄推算現金" + (f"（€{pf_cash_gap:+.2f}，可能是沒截到的小額股息／利息）" if abs(pf_cash_gap) > 0.004 else "")
+                                   + "；股票估價與 Robinhood 報價的差異已併入「未辨識獎勵幣」的推算值（總值 − 現金 − 股票 − 已知加密）。"
+                                   if reward_crypto_src == "portfolio_implied" and use_pf else
+                                   "差額＝Portfolio 截圖總值 − 估算總值（報價差、現金差）。" if use_pf else "估算模式：各項相加即為總盈虧。"),
+                 "positions": sorted(per, key=lambda x: -abs(x["pnl_eur"]))}
     unknowns = []
     if d["sold_unknown_assets"]:
         unknowns.append(f"加密貨幣賣出但 History 沒有買入：{', '.join(d['sold_unknown_assets'])} —— 推測來自 sign-up reward（History 只顯示 €），成本視為 0（獎勵），已實現收益＝賣出所得。")
@@ -452,10 +503,12 @@ def analyze(project: Path, root: Path | None = None, offline: bool = False) -> d
         "holdings": d["holdings"], "stock_eur": stock_eur, "crypto_eur": crypto_eur, "known_crypto_eur": known_crypto_eur,
         "reward_crypto_eur": reward_crypto_eur, "reward_crypto_source": reward_crypto_src,
         "est_total_eur": est_total, "total_eur": total_eur, "value_method": "portfolio_screenshot" if use_pf else "estimate",
-        "portfolio": pf, "pnl_eur": pnl_eur, "pnl_breakdown": breakdown,
+        "portfolio": pf, "pnl_eur": pnl_eur, "pnl_breakdown": breakdown, "pnl_split": pnl_split,
+        "realized_eur_total": real_trade + div, "unrealized_eur_total": unreal, "rewards_pnl_eur": rew_sold + rew_held,
         "pnl_ex_rewards_eur": pnl_eur - d["rewards_eur"], "pnl_pct": pnl_eur / net * 100 if net > 0 else None,
         "eur_usd": eur_usd, "fx_source": P.get("fx_source"), "usdt_per_eur": rate, "prices_at": P.get("at"),
         "total": total_eur * rate, "net_inflow": net * rate, "pnl": pnl_eur * rate,
+        "realized": (real_trade + div) * rate, "unrealized": unreal * rate, "rewards_pnl": (rew_sold + rew_held) * rate,
         "split": {"securities": (total_eur - crypto_part) * rate, "crypto": crypto_part * rate},
         # deposited cash that now sits in bought crypto (cost of held crypto; reward coins cost 0) counts as crypto inflow,
         # so the crypto/securities PnL split isn't skewed by crypto bought with Robinhood cash

@@ -892,7 +892,9 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
         rh = {"present": False, "configured": False, "reason": f"Robinhood 分析失敗：{type(e).__name__}: {e}"[:300]}
     ex["robinhood"] = {k: rh.get(k) for k in ("present", "configured", "reason", "total", "net_inflow", "pnl", "pnl_pct",
                                                "snapshot_time", "split", "total_eur", "pnl_eur", "net_deposits_eur",
-                                               "value_method", "usdt_per_eur", "last_date", "split_net")}
+                                               "value_method", "usdt_per_eur", "last_date", "split_net",
+                                                  "realized", "unrealized", "rewards_pnl", "realized_eur_total",
+                                                  "unrealized_eur_total", "rewards_pnl_eur")}
     for k, v in ex.items():
         if k in ("ibkr", "robinhood"):   # Robinhood: stock tokens (+ cash) → securities; its crypto part is split out below
             v["group"] = "securities"
