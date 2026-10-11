@@ -120,6 +120,17 @@ The weekly LaunchAgent does **not** open or query IB Gateway. For live NAV/posit
 
 **Flex Query** (deposits, dividends, fees, history) still runs **monthly** via HTTP (`ibkr-flex-fetch`) in `tools/weekly_archive.sh` and does **not** need Gateway.
 
+PnL = live NAV − net deposits, and deposits only come from Flex (the Gateway API can't see them). So a fresh Gateway NAV
+with old Flex data overstates PnL after a new deposit. To keep them in step:
+
+- `ibkr-flex-fetch` now **catches up** from the last imported day to the last finished business day (Flex Web Service
+  `fd`/`td` override, a few days of overlap; imports de-duplicate). `--query-period` uses the query's own period instead.
+- The app's **重新整理** button does the same catch-up automatically (HTTP only, at most once per 6 h per target day),
+  whether or not Gateway is open. Deposits made today show up after the next business day.
+- If Gateway answers but returns no NAV (typical right after login), the refresh retries once after 10 s and otherwise
+  says **IBKR 未更新** (the old snapshot stays) instead of "updated".
+- The IBKR tab / overview flag `⚠ 出入金落後 N 天` when Flex coverage is more than 3 days older than the snapshot.
+
 ### Bitget rToken 出清進度 (liquidation progress)
 
 The Bitget tab shows how far tokenized-stock rTokens (`rTSM`, `rSPCX`, … — lowercase `r` + ticker) have been sold down:

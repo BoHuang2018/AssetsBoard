@@ -168,5 +168,80 @@ class FlexWebService(unittest.TestCase):
         self.assertNotIn("SECRET", str(cm.exception))
 
 
+LATER = """<FlexQueryResponse queryName="t" type="AF"><FlexStatements count="2">
+<FlexStatement accountId="U1" fromDate="20260105" toDate="20260105" period="" whenGenerated="20260110;090000">
+ <ChangeInNAV accountId="U1" currency="USD" fromDate="20260105" toDate="20260105" startingValue="1012.3" depositsWithdrawals="500" mtm="2.7" endingValue="1515" twr="0.2"/>
+ <CashTransactions><CashTransaction currency="USD" fxRateToBase="1" type="Deposits/Withdrawals" amount="500" dateTime="20260105" transactionID="C9" description="CASH RECEIPTS"/></CashTransactions>
+</FlexStatement>
+</FlexStatements></FlexQueryResponse>"""
+
+
+class FlexCatchUp(unittest.TestCase):
+    """Live Gateway snapshots are newer than the Flex history → deposits since then were missing and PnL looked too high."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.p = Path(self.td.name)
+        self.root = self.p / "archive" / "ibkr"
+        (self.p / "snapshots").mkdir()
+        (self.p / "snapshots" / "ibkr_fx_refs.json").write_text(json.dumps({"T1": {"ref": 10.0, "src": "test"}}))
+        x = self.p / "s.xml"; x.write_text(XML, encoding="utf-8")
+        F.import_xml(x, self.root)                      # covers to 20260103 (Saturday in this synthetic calendar is irrelevant)
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def test_range_to_last_business_day(self):
+        import datetime as dt
+        self.assertEqual(F.coverage_to(self.root), "20260103")
+        # 2026-01-12 is a Monday → last business day = Friday 2026-01-09; 3 days overlap
+        self.assertEqual(F.catch_up_range(self.root, dt.date(2026, 1, 12)), ("20251231", "20260109"))
+        self.assertEqual(F.last_business_day(dt.date(2026, 1, 11)), dt.date(2026, 1, 9))   # Sunday → Friday
+        self.assertIsNone(F.catch_up_range(self.root, dt.date(2026, 1, 4)))                  # already covered
+
+    def test_catch_up_sends_fd_td_imports_and_throttles(self):
+        import datetime as dt
+        calls = []
+        replies = [b"<FlexStatementResponse><Status>Success</Status><ReferenceCode>R2</ReferenceCode></FlexStatementResponse>", LATER.encode()]
+
+        def opener(req, timeout=0):
+            calls.append(req.full_url)
+            return FakeResp(replies[(len(calls) - 1) % 2])
+        rep = F.catch_up(self.root, "SECRET", "123", self.p / "imports", today=dt.date(2026, 1, 6), opener=opener, sleep=lambda s: None)
+        self.assertEqual(rep["status"], "ok")
+        self.assertIn("fd=20251231", calls[0]); self.assertIn("td=20260105", calls[0])
+        self.assertEqual(F.coverage_to(self.root), "20260105")
+        a = F.analyze(self.p, self.root, offline=True)
+        self.assertAlmostEqual(a["net_inflow"], 1500)               # the later deposit now counts
+        self.assertAlmostEqual(a["pnl"], 15)
+        st = json.loads((self.root / "flex" / "state.json").read_text())
+        self.assertTrue(st["last_catch_up"]["ok"])
+        self.assertNotIn("SECRET", json.dumps(st))
+        # up to date now → no request
+        self.assertEqual(F.catch_up(self.root, "SECRET", "123", self.p / "imports", today=dt.date(2026, 1, 6), opener=opener)["status"], "up_to_date")
+        # a failed/just-tried range is throttled for a few hours
+        rng = ("20260102", "20260107")
+        F.note_catch_up(self.root, rng, False, "x")
+        self.assertFalse(F.catch_up_due(self.root, rng))
+        self.assertTrue(F.catch_up_due(self.root, ("20260102", "20260108")))
+
+    def test_fd_without_td_rejected(self):
+        with self.assertRaises(F.FlexError):
+            F.flex_fetch("SECRET", "1", self.p, fd="20260101")
+
+    def test_ibkr_analyze_flags_stale_flex(self):
+        import datetime as dt
+        t = ibkr.now_oslo()
+        snap = {"exchange": "ibkr", "captured_oslo": t.isoformat(timespec="seconds"), "account": "U1", "base_currency": "USD",
+                "net_liquidation": 1600.0, "total_cash": 20.0, "positions": [], "pnl": None}
+        ibkr.write_snapshot(self.root / t.strftime("%Y-%m") / "snapshots", snap, t)
+        with mock.patch.object(ibkr, "available", return_value=False):
+            a = ibkr.analyze(self.p, self.root, offline=True)
+        self.assertTrue(a["flex_stale"])
+        self.assertEqual(a["flex_coverage_to"], "20260103")
+        self.assertGreater(a["flex_lag_days"], 3)
+        self.assertTrue(any("出入金" in n for n in a["notes"]))
+
+
 if __name__ == "__main__":
     unittest.main()

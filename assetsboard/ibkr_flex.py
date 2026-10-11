@@ -165,11 +165,18 @@ def _resp(body: bytes) -> ET.Element:
         raise FlexError("IBKR Flex Web Service 回傳了無法解析的內容") from None
 
 
-def flex_fetch(token: str, query_id: str, out_dir: Path, opener=None, sleep=time.sleep, tries: int = 12) -> Path:
-    """SendRequest -> poll GetStatement -> save XML. Returns the saved path. Never prints or stores the token."""
+def flex_fetch(token: str, query_id: str, out_dir: Path, opener=None, sleep=time.sleep, tries: int = 12,
+               fd: str | None = None, td: str | None = None) -> Path:
+    """SendRequest -> poll GetStatement -> save XML. Returns the saved path. Never prints or stores the token.
+    fd/td (yyyymmdd, ≤ 365 days apart) override the query's own period (documented Flex Web Service v3 parameters)."""
     if not token or not query_id:
         raise FlexError("缺少 IBKR_FLEX_TOKEN 或 IBKR_FLEX_QUERY_ID")
-    q = urllib.parse.urlencode({"t": token, "q": query_id, "v": "3"})
+    if (fd is None) != (td is None):
+        raise FlexError("fd 與 td 需同時指定")
+    params = {"t": token, "q": query_id, "v": "3"}
+    if fd:
+        params.update(fd=fd, td=td)
+    q = urllib.parse.urlencode(params)
     r = _resp(_http(f"{FLEX_BASE}/SendRequest?{q}", opener))
     if (r.findtext("Status") or "").strip() != "Success":
         raise FlexError(f"SendRequest 失敗：{r.findtext('ErrorCode') or '?'} {r.findtext('ErrorMessage') or ''}".strip())
@@ -202,6 +209,79 @@ def flex_fetch(token: str, query_id: str, out_dir: Path, opener=None, sleep=time
             continue
         raise FlexError(f"GetStatement 失敗：{code or '?'} {root.findtext('ErrorMessage') or ''}".strip())
     raise FlexError("IBKR 仍在產生報表，請稍後再試")
+
+
+def coverage_to(root: Path) -> str | None:
+    """Last day (yyyymmdd) covered by the imported daily NAV chain (else the newest statement 'to')."""
+    chain = nav_chain(load_section(root, "nav")) if present(root) else []
+    if chain:
+        return chain[-1]["toDate"]
+    st_p = flex_dir(root) / "state.json"
+    st = json.loads(st_p.read_text(encoding="utf-8")) if st_p.exists() else {}
+    return max((i["to"] for i in st.get("imports", []) if i.get("to")), default=None)
+
+
+def last_business_day(today: dt.date) -> dt.date:
+    d = today - dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= dt.timedelta(days=1)
+    return d
+
+
+def catch_up_range(root: Path, today: dt.date | None = None, overlap_days: int = 3) -> tuple[str, str] | None:
+    """(fd, td) to bring Flex up to the last finished business day, or None when already covered.
+    A few days of overlap re-read late-booked rows (imports de-duplicate by id)."""
+    today = today or now_oslo().date()
+    td = last_business_day(today)
+    cov = _ymd(coverage_to(root) or "")
+    if cov and cov >= td:
+        return None
+    start = (cov - dt.timedelta(days=overlap_days)) if cov else td - dt.timedelta(days=364)
+    start = max(start, td - dt.timedelta(days=364))
+    return start.strftime("%Y%m%d"), td.strftime("%Y%m%d")
+
+
+def catch_up_due(root: Path, rng: tuple[str, str] | None, now: dt.datetime | None = None, min_hours: float = 6) -> bool:
+    """Avoid hammering the Flex service: one attempt per target day every `min_hours`."""
+    if not rng:
+        return False
+    st_p = flex_dir(root) / "state.json"
+    st = json.loads(st_p.read_text(encoding="utf-8")) if st_p.exists() else {}
+    last = st.get("last_catch_up") or {}
+    if last.get("td") != rng[1] or not last.get("at"):
+        return True
+    now = now or now_oslo()
+    try:
+        return (now - dt.datetime.fromisoformat(last["at"])).total_seconds() >= min_hours * 3600
+    except ValueError:
+        return True
+
+
+def note_catch_up(root: Path, rng: tuple[str, str], ok: bool, msg: str = "") -> None:
+    fd_ = flex_dir(root)
+    fd_.mkdir(parents=True, exist_ok=True)
+    st_p = fd_ / "state.json"
+    st = json.loads(st_p.read_text(encoding="utf-8")) if st_p.exists() else {"imports": []}
+    st["last_catch_up"] = {"fd": rng[0], "td": rng[1], "ok": ok, "msg": msg[:200], "at": now_oslo().isoformat(timespec="seconds")}
+    st_p.write_text(json.dumps(st, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
+def catch_up(root: Path, token: str, query_id: str, out_dir: Path, today: dt.date | None = None, force: bool = False,
+             opener=None, sleep=time.sleep) -> dict:
+    """Download fd..td (last business day) and import. Returns {'status': 'up_to_date'|'skipped'|'ok', ...}."""
+    rng = catch_up_range(root, today)
+    if not rng:
+        return {"status": "up_to_date", "coverage_to": coverage_to(root)}
+    if not force and not catch_up_due(root, rng):
+        return {"status": "skipped", "range": rng, "coverage_to": coverage_to(root)}
+    try:
+        path = flex_fetch(token, query_id, out_dir, opener=opener, sleep=sleep, fd=rng[0], td=rng[1])
+        rep = import_xml(path, root)
+    except FlexError as e:
+        note_catch_up(root, rng, False, str(e))
+        raise
+    note_catch_up(root, rng, True)
+    return {"status": "ok", "range": rng, "file": str(path), "import": rep, "coverage_to": coverage_to(root)}
 
 
 # ---------------------------------------------------------------- FX reference (implicit spread)

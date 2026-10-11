@@ -148,13 +148,29 @@ def _refresh(st: State) -> None:
             R.update(stage="IBKR：讀取本機 IB Gateway（唯讀）…", pct=86)
             try:
                 irep = ibkr_mod.archive_run(st.project / "archive" / "ibkr", progress=False)
-                R["log"].append("IBKR 已更新" + (f"；{len(irep['errors'])} 項錯誤" if irep["errors"] else ""))
+                R["log"].append(ibkr_mod.refresh_message(irep))
             except ibkr_mod.IbkrUnavailable as e:
-                R["log"].append("IBKR 略過：" + str(e)[:160])
+                R["log"].append("IBKR 未更新：" + str(e)[:160])
             except Exception as e:  # noqa: BLE001 - optional source must not break the refresh
                 R["log"].append(f"IBKR 失敗：{type(e).__name__}: {e}"[:200])
         else:
-            R["log"].append("IBKR：IB Gateway 未開啟，略過")
+            R["log"].append("IBKR：IB Gateway 未開啟，沿用上次快照（要更新：開啟並登入 IB Gateway 後再按重新整理）")
+        # IBKR Flex (HTTP, no Gateway): bring deposits/trades up to the last business day so PnL uses current net inflow
+        try:
+            from . import ibkr_flex
+            from .client import credential_sources, load_secret
+            iroot = st.project / "archive" / "ibkr"
+            if ibkr_flex.present(iroot) and all(credential_sources(ibkr_flex.FLEX_NAMES).values()):
+                rng = ibkr_flex.catch_up_range(iroot)
+                if rng and ibkr_flex.catch_up_due(iroot, rng):
+                    R.update(stage=f"IBKR Flex：補抓 {rng[0]}–{rng[1]} 出入金與成交（HTTP）…", pct=86)
+                    frep = ibkr_flex.catch_up(iroot, load_secret("IBKR_FLEX_TOKEN"), load_secret("IBKR_FLEX_QUERY_ID"),
+                                              st.project / "imports" / "ibkr")
+                    R["log"].append(f"IBKR Flex：已補到 {frep.get('coverage_to')}")
+                elif rng:
+                    R["log"].append(f"IBKR Flex：涵蓋至 {ibkr_flex.coverage_to(iroot)}（剛試過，稍後再補）")
+        except Exception as e:  # noqa: BLE001 - optional source must not break the refresh
+            R["log"].append(f"IBKR Flex 補抓失敗：{type(e).__name__}: {e}"[:200])
         R.update(stage="重新計算分析（成本、盈虧、資金流）…", pct=86)
         analysis_mod.run(st.project)
         R["log"].append("分析已更新")

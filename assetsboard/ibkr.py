@@ -409,11 +409,29 @@ def exec_ms(t: str) -> int:
     return int(d.timestamp() * 1000)
 
 
-def archive_run(root: Path, verbose: bool = False, progress: bool = True, on_step=None) -> dict:
+def _nav_ok(raw: dict) -> bool:
+    return bool(((raw.get("summary") or {}).get("NetLiquidation") or {}).get("value"))
+
+
+def archive_run(root: Path, verbose: bool = False, progress: bool = True, on_step=None, retry_wait: float = 10.0,
+                fetch_fn=None) -> dict:
+    """One Gateway read → snapshot. Right after a Gateway login the account data farm is often not ready
+    (no NetLiquidation / timeouts): wait `retry_wait` s and read once more before giving up."""
     from .archive import Store, _load_state
+    fetch_fn = fetch_fn or fetch
+    raw = fetch_fn(verbose=verbose)           # raises IbkrUnavailable
+    retried = False
+    if not _nav_ok(raw) and retry_wait is not None:
+        if on_step:
+            on_step("gateway-retry", 1, 3)
+        time.sleep(retry_wait)
+        raw2 = fetch_fn(verbose=verbose)
+        retried = True
+        if _nav_ok(raw2) or not _nav_ok(raw):
+            raw = raw2
     t = now_oslo()
-    rep = {"captured_oslo": t.isoformat(timespec="seconds"), "root": str(root), "sources": {}, "errors": {}, "exchange": "ibkr"}
-    raw = fetch(verbose=verbose)              # raises IbkrUnavailable
+    rep = {"captured_oslo": t.isoformat(timespec="seconds"), "root": str(root), "sources": {}, "errors": {}, "exchange": "ibkr",
+           "retried": retried}
     if on_step:
         on_step("gateway", 1, 2)
     root.mkdir(parents=True, exist_ok=True)
@@ -453,6 +471,18 @@ def archive_run(root: Path, verbose: bool = False, progress: bool = True, on_ste
     if on_step:
         on_step("snapshot", 2, 2)
     return rep
+
+
+def refresh_message(rep: dict) -> str:
+    """Honest one-line status for the app's refresh log (a run without NAV did NOT update the dashboard)."""
+    errs = rep.get("errors") or {}
+    if not rep.get("snapshot"):
+        why = "; ".join(e.get("msg", "") for k in ("gateway", "incomplete") for e in errs.get(k) or [])[:140]
+        return ("IBKR 未更新：Gateway 有連上但沒回傳淨值（常見於剛登入、資料伺服器還在連線），"
+                "沿用上次快照；等 1 分鐘再按重新整理" + (f"（{why}）" if why else ""))
+    extra = [k for k in errs if k != "snapshot"]
+    return "IBKR 已更新（" + rep["captured_oslo"][11:16] + "）" + ("；重試後成功" if rep.get("retried") else "") + \
+        (f"；部分項目未完整：{', '.join(extra)}" if extra else "")
 
 
 def load_executions(root: Path) -> list[dict]:
@@ -506,6 +536,15 @@ def analyze(project: Path, archive_root: Path | None = None, offline: bool = Fal
         if bl and bl.get("value_base") is not None:
             net_usdt = bl["value_base"] * (bl.get("usdt_per_base") or k or 0) + flows * (k or 0)
     pnl_base = nav - net_base if net_base is not None else None
+    flex_lag = None
+    if fx_.get("present") and fx_.get("coverage_to"):
+        try:
+            cov = dt.datetime.strptime(fx_["coverage_to"], "%Y%m%d").date()
+            snap_d = dt.date.fromisoformat(str(snap["captured_oslo"])[:10])
+            flex_lag = (snap_d - cov).days
+        except ValueError:
+            flex_lag = None
+    flex_stale = bool(flex_lag is not None and flex_lag > 3)
     execs = load_executions(root) if root.exists() else []
     comm = defaultdict(float)
     for e in execs:
@@ -527,7 +566,11 @@ def analyze(project: Path, archive_root: Path | None = None, offline: bool = Fal
         "executions": {"count": len(execs), "first": ms_to_oslo(execs[0]["_ms"])[:10] if execs else None,
                        "commission_by_currency": dict(comm), "recent": execs[-30:]},
         "complete": snap.get("complete"), "errors": snap.get("errors"),
-        "notes": [
+        "flex_coverage_to": fx_.get("coverage_to"), "flex_lag_days": flex_lag, "flex_stale": flex_stale,
+        "snapshot_age_hours": (now_oslo() - dt.datetime.fromisoformat(snap["captured_oslo"])).total_seconds() / 3600
+        if snap.get("captured_oslo") else None,
+        "notes": ([f"⚠ 出入金（Flex）只涵蓋至 {fx_.get('coverage_to')}，比快照早 {flex_lag} 天：這段期間的入金尚未計入淨入金，盈虧可能偏高。"
+                   f"按「重新整理」會自動補抓 Flex（HTTP，不需 Gateway），或執行 {cli_cmd()} ibkr-flex-fetch。"] if flex_stale else []) + [
             f"資料來自本機 IB Gateway（唯讀 API，帳戶 {snap['account']}），在 Mac 讀取後匯出給 box。",
             f"本頁以基礎貨幣 {base} 顯示；合併總覽以 1 {base} ≈ {k:.6g} USDT 換算（匯率：{fx_src}）。" if k else f"⚠ 查不到 {base}→USD 匯率，無法併入合計。",
             note or ("TWS API 讀不到入金／出金紀錄：盈虧以基準（" + ((bl or {}).get("at") or "—")[:16].replace("T", " ") + "）起算，"

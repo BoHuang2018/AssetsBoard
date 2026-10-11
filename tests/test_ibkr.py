@@ -149,5 +149,36 @@ class Session(unittest.TestCase):
             self.assertAlmostEqual(a["pnl_base"], 0.0)
 
 
+class ArchiveRetry(unittest.TestCase):
+    """Right after a Gateway login the first read often has no NetLiquidation: retry once, and say so honestly."""
+
+    def _raw(self, nav):
+        summ = {"NetLiquidation": {"value": nav, "currency": "USD"}} if nav else {}
+        return {"account": "U1", "accounts": ["U1"], "server_version": 176, "summary": summ, "values": {}, "positions": [],
+                "portfolio": [], "pnl": None, "executions": {}, "commissions": {}, "errors": [],
+                "complete": {"summary": bool(nav), "positions": True, "portfolio": True, "pnl": bool(nav), "executions": True}}
+
+    def test_retry_then_ok(self):
+        seq = [self._raw(None), self._raw("1000")]
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(ibkr, "build_snapshot", side_effect=lambda raw, t: {
+                "exchange": "ibkr", "captured_oslo": t.isoformat(timespec="seconds"), "account": "U1", "base_currency": "USD",
+                "net_liquidation": float(raw["summary"]["NetLiquidation"]["value"]) if raw["summary"] else None,
+                "positions": [], "pnl": None}), mock.patch.object(ibkr, "usd_per", return_value=(1.0, "t")), \
+                mock.patch.object(ibkr, "usdt_per_usd", return_value=1.0):
+            rep = ibkr.archive_run(Path(td), progress=False, retry_wait=0, fetch_fn=lambda verbose=False: seq.pop(0))
+        self.assertTrue(rep["retried"])
+        self.assertIn("snapshot", rep)
+        self.assertIn("已更新", ibkr.refresh_message(rep))
+
+    def test_no_nav_is_reported_as_not_updated(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(ibkr, "build_snapshot", side_effect=lambda raw, t: {
+                "exchange": "ibkr", "captured_oslo": t.isoformat(timespec="seconds"), "account": "U1", "base_currency": "USD",
+                "net_liquidation": None, "positions": [], "pnl": None}):
+            rep = ibkr.archive_run(Path(td), progress=False, retry_wait=0, fetch_fn=lambda verbose=False: self._raw(None))
+        msg = ibkr.refresh_message(rep)
+        self.assertTrue(msg.startswith("IBKR 未更新"))
+        self.assertNotIn("已更新", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

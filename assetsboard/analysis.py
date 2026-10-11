@@ -877,6 +877,8 @@ def run(project: Path, offline: bool = False, archive_dir: Path | None = None) -
                                           "base_currency", "nav_base", "pnl_base", "usdt_per_base", "cash_share")}
     ex["ibkr"]["pnl_pct"] = ib.get("pnl_pct")
     ex["ibkr"]["pnl_method"] = ib.get("pnl_method")
+    for k in ("flex_coverage_to", "flex_lag_days", "flex_stale"):
+        ex["ibkr"][k] = ib.get(k)
     ex["ibkr"]["baseline"] = ({"at": ib["baseline"].get("at"), "value": ib["baseline"].get("value_base"),
                                "label": "自 " + (ib["baseline"].get("at") or "")[:10] + " 起計算"} if ib.get("baseline") else None)
     if (ib.get("flex") or {}).get("present") and ib.get("pnl_method", "").startswith("flex"):

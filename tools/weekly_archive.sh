@@ -81,7 +81,7 @@ echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') wallets weekly $([ $rc_w -eq 0 ] && 
 
 # ---- IBKR Flex only (HTTP; no Gateway). Live Gateway archive is manual — user opens Gateway then asks.
 rc_i=0
-# Flex Web Service (deposits, dividends, fees, full trade history) — monthly: query period is "last month".
+# Flex Web Service (deposits, dividends, fees, full trade history) — monthly; fetches from the last imported day to the last business day.
 # Runs on the first Monday of the month (day 1–7), or catch-up when newest Flex import is older than 35 days / missing.
 # Needs Keychain IBKR_FLEX_TOKEN + IBKR_FLEX_QUERY_ID only — does NOT need IB Gateway.
 flex_age=$(.venv/bin/python - <<'PY' 2>/dev/null

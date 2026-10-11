@@ -345,8 +345,22 @@ def cmd_ibkr_flex_fetch(args) -> int:
                f"在 IBKR Client Portal 建立 Flex Web Service Token 與 Activity Flex Query 後執行 {cli_cmd()} setup-keychain --exchange ibkr-flex")
         print(msg, file=sys.stderr)
         return 0 if args.if_configured else 2
+    root = SNAPSHOT_DIR.parent / "archive" / "ibkr"
+    out_dir = SNAPSHOT_DIR.parent / "imports" / "ibkr"
+    if ibkr_flex.present(root) and not getattr(args, "query_period", False) and not args.no_import:
+        # default: catch up from the last imported day to the last business day (fd/td override; HTTP only, no Gateway)
+        try:
+            rep = ibkr_flex.catch_up(root, load_secret("IBKR_FLEX_TOKEN"), load_secret("IBKR_FLEX_QUERY_ID"), out_dir, force=True)
+        except ibkr_flex.FlexError as e:
+            print(f"IBKR Flex：{e}", file=sys.stderr)
+            return 1
+        if rep["status"] == "up_to_date":
+            print(f"IBKR Flex：已是最新（涵蓋至 {rep['coverage_to']}）")
+        else:
+            print(f"IBKR Flex：已補抓 {rep['range'][0]}–{rep['range'][1]} → 涵蓋至 {rep['coverage_to']}（{rep['file']}）")
+        return 0
     try:
-        p = ibkr_flex.flex_fetch(load_secret("IBKR_FLEX_TOKEN"), load_secret("IBKR_FLEX_QUERY_ID"), SNAPSHOT_DIR.parent / "imports" / "ibkr")
+        p = ibkr_flex.flex_fetch(load_secret("IBKR_FLEX_TOKEN"), load_secret("IBKR_FLEX_QUERY_ID"), out_dir)
     except ibkr_flex.FlexError as e:
         print(f"IBKR Flex：{e}", file=sys.stderr)
         return 1
@@ -949,9 +963,10 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--quiet", action="store_true", help="只匯入，不印摘要")
     pf.add_argument("--offline", action="store_true", help="摘要不抓匯率參考價（只用快取）")
     pf.set_defaults(func=cmd_ibkr_import)
-    pg = sub.add_parser("ibkr-flex-fetch", help="用 Flex Web Service 下載報表（IBKR_FLEX_TOKEN／IBKR_FLEX_QUERY_ID，鑰匙圈）並匯入")
+    pg = sub.add_parser("ibkr-flex-fetch", help="用 Flex Web Service 下載報表並匯入（預設補到上個營業日；HTTP，不需 Gateway）")
     pg.add_argument("--no-import", action="store_true", help="只下載到 imports/ibkr/，不匯入")
     pg.add_argument("--if-configured", action="store_true", help="沒設定 token 時安靜略過（exit 0；給每週排程用）")
+    pg.add_argument("--query-period", action="store_true", help="用 Flex Query 自己設定的期間（預設：從已匯入的最後一天補到上個營業日）")
     pg.add_argument("--offline", action="store_true", help=argparse.SUPPRESS)
     pg.set_defaults(func=cmd_ibkr_flex_fetch)
     pcb = sub.add_parser("set-cryptocom-baseline", help="設定 Crypto.com 盈虧基準（now＝重新讀取；latest＝用最新快照；clear）")
