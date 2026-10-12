@@ -49,6 +49,18 @@ cp wallets.example.json archive/wallets/wallets.json
 .venv/bin/python -m assetsboard archive --exchange wallets
 ```
 
+Balances come from public explorers (Arbiscan-style RPC for EVM tokens, taoscan for Bittensor TAO, current response
+format). If an explorer is down, the last good amounts are carried forward and the wallet row is marked as carried
+(`carried_from`) instead of dropping to zero.
+
+### Troubleshooting API keys
+
+- Keychain values are read with whitespace stripped; if `security -w` returns hex (item stored with a trailing
+  newline), it is decoded automatically. Service name `assetsboard`, with fallback to the legacy `bitguard` items.
+- **MEXC `700001`** means MEXC *recognised* the key (an unknown key gives `10072`) but refuses it for spot reads —
+  check the key's Spot account-read permission / IP whitelist, or the network (corporate proxies such as Zscaler change
+  your egress IP). The status panel explains this instead of suggesting a new key.
+
 ### Dashboard
 
 ```bash
