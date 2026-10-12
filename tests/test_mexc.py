@@ -11,7 +11,7 @@ from unittest import mock
 
 from assetsboard import mexc
 
-DOC_SECRET = "45d0b3c26f2644f19bfb98b07741b2f5"   # MEXC Spot v3 docs, "SIGNED Endpoint Examples"
+DOC_SECRET = "45d0b3c26f2644f19bfb98b07741b2f5"   # allowlist-secret: MEXC Spot v3 docs, "SIGNED Endpoint Examples"
 DOC_QUERY = "symbol=BTCUSDT&side=BUY&type=LIMIT&quantity=1&price=11&recvWindow=5000&timestamp=1644489390087"
 
 

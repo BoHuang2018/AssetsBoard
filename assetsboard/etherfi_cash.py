@@ -58,14 +58,23 @@ def load_config(root: Path) -> dict:
     if not p.exists():
         root.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(DEFAULT_CONFIG, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        return dict(DEFAULT_CONFIG)
+        return apply_env(dict(DEFAULT_CONFIG))
     try:
         doc = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise CashError(f"讀取 {p} 失敗：{e}") from None
     out = dict(DEFAULT_CONFIG)
     out.update(doc)
-    return out
+    return apply_env(out)
+
+
+def apply_env(cfg: dict) -> dict:
+    """ETHERFI_CASH_VAULT from .env / environment overrides config.json (and enables the account)."""
+    from . import envconfig
+    v = envconfig.get("ETHERFI_CASH_VAULT")
+    if v:
+        cfg = dict(cfg, vault=v, enabled=True)
+    return cfg
 
 
 def _http_json(url: str, timeout: int = 30) -> dict:

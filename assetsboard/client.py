@@ -127,8 +127,14 @@ def cli_cmd() -> str:
     return ".venv/bin/python -m assetsboard" if in_venv or (venv / "bin" / "python").exists() else "python3 -m assetsboard"
 
 
+ENV_FILE_OK = frozenset({"IBKR_FLEX_QUERY_ID"})
+
+
 def load_secret(name: str) -> str:
     val = os.environ.get(name, "").strip() or keychain_read(name) or _file_secret(name)
+    if not val and name in ENV_FILE_OK:   # non-secret ids may also live in .env (keys/tokens: Keychain only)
+        from . import envconfig
+        val = envconfig.get(name) or ""
     if val:
         return val
     flag = next((f" --exchange {e}" for pre, e in (("MEXC_", "mexc"), ("KRAKEN_", "kraken"), ("CRYPTOCOM_", "cryptocom"), ("IBKR_FLEX_", "ibkr-flex")) if name.startswith(pre)), "")

@@ -72,12 +72,25 @@ def load_config(root: Path) -> list[dict]:
         doc = {"_doc": "唯讀鏈上錢包地址（不是密鑰）。可新增／修改後執行 archive --exchange wallets。",
                "wallets": DEFAULT_WALLETS}
         p.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        return [dict(w) for w in DEFAULT_WALLETS]
+        return apply_env([dict(w) for w in DEFAULT_WALLETS])
     try:
         doc = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise WalletError(f"讀取 {p} 失敗：{e}") from None
-    return list(doc.get("wallets") or [])
+    return apply_env(list(doc.get("wallets") or []))
+
+
+def apply_env(wallets: list[dict]) -> list[dict]:
+    """Address from .env / environment (WALLET_<ID>_ADDRESS) overrides wallets.json; JSON stays the fallback."""
+    from . import envconfig
+    out = []
+    for w in wallets:
+        w = dict(w)
+        a = envconfig.get(envconfig.wallet_var(str(w.get("id") or "")))
+        if a:
+            w["address"] = a
+        out.append(w)
+    return out
 
 
 def _http_json(url: str, body: bytes | None = None, timeout: int = 20) -> dict:

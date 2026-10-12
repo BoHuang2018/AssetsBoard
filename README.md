@@ -85,6 +85,30 @@ tools/build_mac_app.sh && open ~/Applications/AssetsBoard.app
 
 Copy or rename your local folder, keep `.venv` or recreate it, and point LaunchAgent / app build scripts at the new path. **Do not** commit `archive/`, `exports/`, or `snapshots/`.
 
+## Private settings (`.env`) and the pre-commit guard
+
+Private-but-not-secret values live in a gitignored **`.env`** in the project root (`cp .env.example .env && chmod 600 .env`):
+
+| Variable | Used for |
+|---|---|
+| `WALLET_<ID>_ADDRESS` | overrides the address of the wallet with that `id` in `archive/wallets/wallets.json` (id upper-cased, non-alnum → `_`) |
+| `ETHERFI_CASH_VAULT` | ether.fi Cash vault (also enables the account) |
+| `IBKR_FLEX_QUERY_ID` | Flex query id (Keychain / env still win; the Flex **token** stays in the Keychain) |
+| `IBKR_ACCOUNT_ID`, `BITGET_TAO_DEPOSIT_ADDRESS` | not read by the app — listed so the pre-commit guard blocks them |
+
+Precedence: environment variable > `.env` > the legacy JSON configs (`archive/wallets/wallets.json`,
+`archive/etherfi_cash/config.json`), which keep working unchanged. **API keys, secrets, tokens and passphrases are never
+read from `.env`** (names ending in `_KEY/_SECRET/_TOKEN/_PASSPHRASE/_PASSWORD` are ignored) — they stay in the Keychain.
+Tests never read the real `.env` (`tests/__init__.py` points the loader at a non-existent file).
+
+**Pre-commit guard** — install once per clone: `sh tools/install_hooks.sh`. `tools/precommit_scan.py` blocks a commit
+whose added lines contain any `.env` value, any address from the private JSON configs, any token whose sha256 is in
+`tools/private_hashes.txt` (real high-entropy addresses, hashes only) or in the clone-local, uncommitted
+`.git/assetsboard_private_hashes.txt` (low-entropy ids such as account numbers), secret-like patterns (private-key
+blocks, exchange/GitHub/AWS/Slack keys, long literals assigned to key/secret/token names), or private files (`.env`,
+`wallets.json`, `analysis_overrides.json`, `archive/`, `snapshots/`, `exports/`, `imports/`). Findings show file:line and
+rule, never the value. Published documentation example keys in tests carry an `allowlist-secret` marker.
+
 ## Safety model
 
 - Exchange modules use **strict allowlists** of read-only endpoints (writes refused locally).

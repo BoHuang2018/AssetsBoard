@@ -1,0 +1,6 @@
+# sha256(lower(value)) of real addresses that must never be committed (high-entropy only — low-entropy ids such as
+# account numbers go in the clone-local, uncommitted .git/assetsboard_private_hashes.txt). Read by precommit_scan.py.
+31e9b61f8e5c97f5cdbbf9423a36d469b0f67b7ba18274b9295ee7d24c3de42f  wallet arbitrum
+b89bcd2ad50508d500be2afcaae0a658ae52b0465386a70f1fb6a82903bf943c  wallet bittensor
+24d725d0994fa4ad114067b830602e07dfbb5bef9dd1bdd7fc9a4e0693e66284  ether.fi cash vault
+711d766990b13984e37fd395a9412859f85a3155e64b09d54f098c43d24fcba0  bitget TAO deposit
